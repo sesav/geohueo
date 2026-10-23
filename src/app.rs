@@ -7,6 +7,7 @@ use anyhow::{Context, Result};
 
 use crate::cli::{self, Args, Command};
 use crate::config::{Adapter, Config, SelectedProfile};
+use crate::error::{ErrorCode, LookupError};
 use crate::model::LookupTarget;
 use crate::output::Output;
 use crate::provider::GeoProvider;
@@ -164,7 +165,7 @@ fn run_with_provider(
         let target = match resolve(input, args.family) {
             Ok(target) => target,
             Err(message) => {
-                output.emit_error(input, &message)?;
+                output.emit_error(input, &LookupError::new(ErrorCode::Dns, &message))?;
                 writeln!(stderr, "geohueo: {message}")?;
                 failed = true;
                 continue;
@@ -215,14 +216,20 @@ fn lookup(
     let lookup_target = ip.map_or(LookupTarget::SelfIp, LookupTarget::Ip);
     if !provider.capabilities().supports(lookup_target) {
         let message = "target is not supported by this profile";
-        output.emit_error(target, message)?;
+        output.emit_error(
+            target,
+            &LookupError::new(ErrorCode::UnsupportedCapability, message),
+        )?;
         writeln!(stderr, "geohueo: {label}: {message}")?;
         return Ok(LookupStatus::Unsupported);
     }
     let info = match provider.lookup(lookup_target) {
         Ok(info) => info,
         Err(error) => {
-            output.emit_error(target, &format!("{error:#}"))?;
+            output.emit_error(
+                target,
+                &LookupError::from_error(&error, ErrorCode::Provider),
+            )?;
             writeln!(stderr, "geohueo: {label}: lookup failed: {error:#}")?;
             return Ok(LookupStatus::Failure);
         }
@@ -233,8 +240,13 @@ fn lookup(
     } else {
         label
     };
+    let resolved_ip = ip.map(|ip| ip.to_string());
     output
-        .emit(&info, display_label, target)
+        .emit(
+            &info,
+            resolved_ip.as_deref().unwrap_or(display_label),
+            target,
+        )
         .with_context(|| format!("could not write result for {display_label} to stdout"))?;
 
     if !info.success {
@@ -351,6 +363,55 @@ mod tests {
                 .starts_with("  IP:              9.9.9.9\n")
         );
         assert_eq!(*provider.targets.borrow(), [LookupTarget::SelfIp]);
+    }
+
+    #[test]
+    fn text_uses_resolved_ip_when_provider_omits_ip() {
+        struct WithoutIp;
+        impl GeoProvider for WithoutIp {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    ipv4: true,
+                    ipv6: true,
+                    self_ip: true,
+                }
+            }
+            fn lookup(&self, _: LookupTarget) -> Result<LookupResult> {
+                Ok(LookupResult::new(
+                    GeoRecord {
+                        country_code: Some("US".into()),
+                        ..GeoRecord::default()
+                    },
+                    true,
+                ))
+            }
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with_provider(
+            Args {
+                targets: vec!["localhost".into(), "8.8.8.8".into()],
+                ..Args::default()
+            },
+            &WithoutIp,
+            Some("custom"),
+            Some("rest-json fixture"),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        let text = String::from_utf8(stdout).unwrap();
+        let addresses: Vec<IpAddr> = text
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("IP:"))
+            .map(|ip| ip.trim().parse().unwrap())
+            .collect();
+        assert_eq!(addresses.len(), 2);
+        assert!(addresses[0].is_loopback());
+        assert_eq!(addresses[1], "8.8.8.8".parse::<IpAddr>().unwrap());
+        assert!(text.contains("Target:          localhost"));
     }
 
     #[test]
@@ -537,9 +598,12 @@ mod tests {
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0]["target"], "[invalid]");
         assert_eq!(lines[0]["success"], false);
+        assert_eq!(lines[0]["error"]["code"], "dns");
+        assert_eq!(lines[1]["error"]["code"], "no_data");
+        assert_eq!(lines[1]["error"]["http_status"], 404);
         assert_eq!(lines[1]["target"], "8.8.8.8");
         assert!(
-            lines[1]["error"]
+            lines[1]["error"]["message"]
                 .as_str()
                 .unwrap()
                 .contains("no geolocation")

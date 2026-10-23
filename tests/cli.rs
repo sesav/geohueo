@@ -158,7 +158,7 @@ fn explicit_normalized_json_has_one_error_per_target_without_changing_legacy_jso
     assert_eq!(lines[0]["schema_version"], 1);
     assert_eq!(lines[0]["success"], false);
     assert!(
-        lines[0]["error"]
+        lines[0]["error"]["message"]
             .as_str()
             .unwrap()
             .contains("cannot resolve")
@@ -481,7 +481,13 @@ fn rest_json_cli_checks_config_credentials_and_capabilities_without_network() {
     let line: serde_json::Value = serde_json::from_slice(&unsupported.stdout).unwrap();
     assert_eq!(line["profile"], "custom");
     assert_eq!(line["success"], false);
-    assert!(line["error"].as_str().unwrap().contains("not supported"));
+    assert!(
+        line["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("not supported")
+    );
+    assert_eq!(line["error"]["code"], "unsupported_capability");
     assert!(
         !String::from_utf8(unsupported.stderr)
             .unwrap()

@@ -1,7 +1,7 @@
 # geohueo
 
-geohueo is a command-line tool for looking up geolocation and network information for IP addresses and hostnames.
-It uses geoiplookup.io by default and requires no configuration or API credentials to get started.
+geohueo is a command-line tool for looking up geolocation and network information for IP addresses and hostnames. It
+uses geoiplookup.io by default and requires no configuration or API credentials to get started.
 
 Provider profiles support MaxMind's free GeoLite and paid GeoIP web services, as well as custom HTTP GET APIs that
 return JSON. Configure profiles in TOML, select one per lookup, or set a default provider for subsequent lookups.
@@ -174,13 +174,28 @@ prints:
 
 The JSON examples are pretty-printed for readability; geohueo writes one compact JSON object per line.
 
-`--json` keeps the original format for geoiplookup and uses normalized JSON for MaxMind and REST/JSON profiles. To force normalized JSON for any profile (including geoiplookup):
+`--json` keeps the original format for geoiplookup and uses normalized JSON for MaxMind and REST/JSON profiles. To force
+normalized JSON for any profile (including geoiplookup):
 
 ```sh
 geohueo --output normalized-json 8.8.8.8
 ```
 
 `--json` and `--output` cannot be combined.
+
+Normalized JSON Lines produce one result per target, including lookup failures. Failures contain an `error` object
+instead of `data`, with a stable `code`, a diagnostic `message`, and an optional `http_status`:
+
+```json
+{"schema_version":1,"profile":"geolite","provider":"maxmind geolite city","target":"8.8.8.8","success":false,"error":{"code":"authentication","message":"MaxMind HTTP 401: invalid MaxMind credentials","http_status":401}}
+```
+
+Lookup error codes are `dns`, `timeout`, `transport`, `http`, `authentication`, `permission_denied`, `quota_exceeded`,
+`rate_limited`, `decode`, `mapping`, `no_data`, `unsupported_capability`, and `api` (a REST/JSON success rule or error
+field reports failure). `provider` is the fallback for an unclassified third-party provider error. Use `code` for
+programmatic handling; message wording is not a stable contract. Configuration and missing-credential errors stop
+execution before lookups, write diagnostics to stderr, and return exit code 2 without emitting per-target JSON. The
+legacy geoiplookup.io `--json` format remains unchanged.
 
 For hostnames, `IP` is the resolved address and `Target` is the hostname.
 
@@ -223,15 +238,14 @@ geohueo --profile geolite 8.8.8.8
 ```
 
 `--check-config` validates the configuration and loads credentials for the selected profile without contacting the
-provider. Ready-to-edit examples: [GeoIP
-City](examples/profiles/maxmind-geoip.toml), [GeoLite City](examples/profiles/maxmind-geolite-city.toml), and [GeoLite
-Country](examples/profiles/maxmind-geolite.toml).
+provider. Ready-to-edit examples: [GeoIP City](examples/profiles/maxmind-geoip.toml), [GeoLite
+City](examples/profiles/maxmind-geolite-city.toml), and [GeoLite Country](examples/profiles/maxmind-geolite.toml).
 
 ### Other JSON APIs
 
-Start from [rest-path.toml](examples/profiles/rest-path.toml) or [rest-query.toml](examples/profiles/rest-query.toml).
-Copy one into your config, then change `base_url`, the request path/query, the JSON field pointers, and the auth
-section. The examples cover Bearer, Basic, and API-key authentication.
+Start from [rest-path.toml](examples/profiles/rest-path.toml), [rest-query.toml](examples/profiles/rest-query.toml), or
+[rest-basic.toml](examples/profiles/rest-basic.toml). Copy one into your config, then change `base_url`, the request
+path/query, the JSON field pointers, and the auth section. The examples cover Bearer, Basic, and API-key authentication.
 
 ```sh
 geohueo --config ./config.toml --check-config

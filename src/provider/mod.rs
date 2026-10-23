@@ -28,6 +28,8 @@ impl Capabilities {
 /// An object-safe interface for looking up IP geolocation through a provider.
 pub trait GeoProvider {
     fn capabilities(&self) -> Capabilities;
+    /// Built-in providers return errors downcastable to [`crate::error::LookupError`].
+    /// Custom providers may use that type to supply stable normalized error codes.
     fn lookup(&self, target: LookupTarget) -> Result<LookupResult>;
 }
 

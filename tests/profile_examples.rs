@@ -10,6 +10,8 @@ fn cli(config: &Path) -> Command {
     command.env_remove("MAXMIND_LICENSE_KEY");
     command.env_remove("CUSTOM_GEO_TOKEN");
     command.env_remove("CUSTOM_GEO_API_KEY");
+    command.env_remove("CUSTOM_GEO_USERNAME");
+    command.env_remove("CUSTOM_GEO_PASSWORD");
     command
 }
 
@@ -50,6 +52,14 @@ fn shipped_profile_examples_validate_without_network_and_load_only_selected_secr
             "rest-query.toml",
             "query-api",
             [("CUSTOM_GEO_API_KEY", "example-key"), ("", "")],
+        ),
+        (
+            "rest-basic.toml",
+            "basic-api",
+            [
+                ("CUSTOM_GEO_USERNAME", "example-user"),
+                ("CUSTOM_GEO_PASSWORD", "example-password"),
+            ],
         ),
     ] {
         let config = examples.join(file);

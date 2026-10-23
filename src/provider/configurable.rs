@@ -11,6 +11,7 @@ use serde_json::Value;
 use url::Url;
 
 use crate::config::{read_secret, validate_env_name};
+use crate::error::{ErrorCode, LookupError};
 use crate::model::{GeoRecord, LookupResult, LookupTarget};
 use crate::provider::{Capabilities, GeoProvider};
 use crate::transport::HttpTransport;
@@ -197,6 +198,7 @@ impl RestProfile {
 
     pub fn resolve(&self) -> Result<RestSettings> {
         self.resolve_with(read_secret)
+            .map_err(|error| LookupError::from_error(&error, ErrorCode::Credentials).into())
     }
 
     fn resolve_with(&self, read: impl Fn(&str) -> Result<String>) -> Result<RestSettings> {
@@ -581,7 +583,9 @@ impl Client {
                 300..=399 => "redirect refused",
                 _ => "request failed",
             };
-            bail!("REST/JSON HTTP {status}: {reason}");
+            return Err(
+                LookupError::http(status, format!("REST/JSON HTTP {status}: {reason}")).into(),
+            );
         }
         let content_type = response
             .headers()
@@ -596,17 +600,27 @@ impl Client {
         if content_type != "application/json"
             && !(content_type.starts_with("application/") && content_type.ends_with("+json"))
         {
-            bail!("REST/JSON response is not JSON");
+            return Err(
+                LookupError::new(ErrorCode::Decode, "REST/JSON response is not JSON").into(),
+            );
         }
         let body = response
             .body_mut()
             .with_config()
             .limit(MAX_BODY)
             .read_to_vec()
-            .map_err(|_| anyhow!("REST/JSON response could not be read or exceeded size limit"))?;
+            .map_err(|error| {
+                LookupError::from_http_client(
+                    &error,
+                    "REST/JSON response could not be read or exceeded size limit",
+                )
+            })?;
         let json: Value = serde_json::from_slice(&body)
-            .map_err(|_| anyhow!("invalid REST/JSON response JSON"))?;
-        self.settings.response.map(&json)
+            .map_err(|_| LookupError::new(ErrorCode::Decode, "invalid REST/JSON response JSON"))?;
+        self.settings
+            .response
+            .map(&json)
+            .map_err(|error| LookupError::from_error(&error, ErrorCode::Mapping).into())
     }
 }
 
@@ -617,7 +631,11 @@ impl GeoProvider for Client {
 
     fn lookup(&self, target: LookupTarget) -> Result<LookupResult> {
         if !self.capabilities().supports(target) {
-            bail!("target is not supported by this profile");
+            return Err(LookupError::new(
+                ErrorCode::UnsupportedCapability,
+                "target is not supported by this profile",
+            )
+            .into());
         }
         Ok(LookupResult::new(self.lookup_response(target)?, true))
     }
@@ -634,7 +652,9 @@ impl Response {
             }
             if !expected.matches(value) {
                 self.api_failure(json)?;
-                bail!("REST/JSON API reported failure");
+                return Err(
+                    LookupError::new(ErrorCode::Api, "REST/JSON API reported failure").into(),
+                );
             }
         }
         if let Some(pointer) = &self.error_message_pointer {
@@ -642,7 +662,9 @@ impl Response {
             // untrusted text, which can contain a query key or reflected token.
             match json.pointer(pointer) {
                 Some(Value::String(message)) if !message.is_empty() => {
-                    bail!("REST/JSON API reported failure")
+                    return Err(
+                        LookupError::new(ErrorCode::Api, "REST/JSON API reported failure").into(),
+                    );
                 }
                 None | Some(Value::Null | Value::String(_)) => {}
                 _ => bail!("REST/JSON Mapping: error_message_pointer must refer to a string"),
@@ -969,6 +991,14 @@ asn_number = "asn_to_number"
             let error = client.lookup(LookupTarget::SelfIp).unwrap_err();
             assert!(format!("{error:#}").contains(expected), "{error:#}");
             assert!(!format!("{error:#}").contains("secret-token"));
+            assert_eq!(
+                error.downcast_ref::<LookupError>().unwrap().code,
+                if expected == "reported failure" {
+                    ErrorCode::Api
+                } else {
+                    ErrorCode::Mapping
+                }
+            );
         }
     }
 
@@ -997,13 +1027,14 @@ asn_number = "asn_to_number"
 
     #[test]
     fn handles_http_and_decode_errors_with_bounded_body_and_no_secrets() {
-        for (response, expected) in [
+        for (response, expected, code) in [
             (
                 HttpResponse::Http {
                     status: 401,
                     body: "secret-token",
                 },
                 "authentication",
+                ErrorCode::Authentication,
             ),
             (
                 HttpResponse::Http {
@@ -1011,6 +1042,7 @@ asn_number = "asn_to_number"
                     body: "secret-token",
                 },
                 "rate limited",
+                ErrorCode::RateLimited,
             ),
             (
                 HttpResponse::HttpWithType {
@@ -1019,6 +1051,7 @@ asn_number = "asn_to_number"
                     content_type: "text/html",
                 },
                 "not JSON",
+                ErrorCode::Decode,
             ),
             (
                 HttpResponse::Http {
@@ -1026,6 +1059,7 @@ asn_number = "asn_to_number"
                     body: "{secret-token}",
                 },
                 "invalid REST/JSON",
+                ErrorCode::Decode,
             ),
             (
                 HttpResponse::Http {
@@ -1033,11 +1067,14 @@ asn_number = "asn_to_number"
                     body: Box::leak(" ".repeat(MAX_BODY as usize + 1).into_boxed_str()),
                 },
                 "size limit",
+                ErrorCode::Decode,
             ),
         ] {
             let server = TestServer::new(vec![response]);
             let client = client(PATH_PROFILE, &server, "secret-token");
-            let message = format!("{:#}", client.lookup(LookupTarget::SelfIp).unwrap_err());
+            let error = client.lookup(LookupTarget::SelfIp).unwrap_err();
+            assert_eq!(error.downcast_ref::<LookupError>().unwrap().code, code);
+            let message = format!("{error:#}");
             assert!(message.contains(expected), "{message}");
             assert!(!message.contains("secret-token"));
         }
@@ -1045,13 +1082,18 @@ asn_number = "asn_to_number"
 
     #[test]
     fn transport_failure_and_stalled_body_hide_query_key_and_request_url() {
-        for response in [HttpResponse::Disconnect, HttpResponse::StallDuringBody] {
+        for (response, code) in [
+            (HttpResponse::Disconnect, ErrorCode::Transport),
+            (HttpResponse::StallBeforeHeaders, ErrorCode::Timeout),
+            (HttpResponse::StallDuringBody, ErrorCode::Timeout),
+        ] {
             let server = TestServer::new(vec![response]);
             let client = client(QUERY_PROFILE, &server, "key/should?not=leak");
             let error = client
                 .lookup(LookupTarget::Ip("8.8.8.8".parse().unwrap()))
                 .unwrap_err();
             let message = format!("{error:#}");
+            assert_eq!(error.downcast_ref::<LookupError>().unwrap().code, code);
             assert!(!message.contains("key/should?not=leak"));
             assert!(!message.contains("key%2Fshould"));
             assert!(!message.contains("/geo?"));

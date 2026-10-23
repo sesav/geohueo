@@ -1,1 +1,1 @@
-{"schema_version":1,"profile":"geoiplookup","provider":"geoiplookup.io","target":"8.8.8.8","success":false,"error":"no geolocation data"}
+{"schema_version":1,"profile":"geoiplookup","provider":"geoiplookup.io","target":"8.8.8.8","success":false,"error":{"code":"no_data","message":"no geolocation data"}}

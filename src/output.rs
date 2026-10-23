@@ -3,6 +3,7 @@ use std::io::{self, Write};
 
 use serde::Serialize;
 
+use crate::error::{ErrorCode, LookupError};
 use crate::model::{GeoRecord, LookupResult};
 
 pub struct Output<W> {
@@ -66,23 +67,28 @@ impl<W: Write> Output<W> {
             } else if result.success {
                 self.write_normalized(target, true, Some(&result.record), None)?;
             } else {
-                self.write_normalized(target, false, None, Some("no geolocation data"))?;
+                self.write_normalized(
+                    target,
+                    false,
+                    None,
+                    Some(&LookupError::new(ErrorCode::NoData, "no geolocation data")),
+                )?;
             }
         } else if result.success {
             if !self.first {
                 writeln!(self.writer)?;
             }
 
-            write!(self.writer, "{}", render(&result.record, label))?;
+            write!(self.writer, "{}", render(&result.record, label, target))?;
             self.first = false;
         }
 
         Ok(())
     }
 
-    pub fn emit_error(&mut self, target: &str, message: &str) -> io::Result<()> {
+    pub fn emit_error(&mut self, target: &str, error: &LookupError) -> io::Result<()> {
         if self.json && self.profile.is_some() {
-            self.write_normalized(target, false, None, Some(message))?;
+            self.write_normalized(target, false, None, Some(error))?;
         }
         Ok(())
     }
@@ -92,7 +98,7 @@ impl<W: Write> Output<W> {
         target: &str,
         success: bool,
         data: Option<&GeoRecord>,
-        error: Option<&str>,
+        error: Option<&LookupError>,
     ) -> io::Result<()> {
         #[derive(Serialize)]
         struct Line<'a> {
@@ -105,7 +111,7 @@ impl<W: Write> Output<W> {
             #[serde(skip_serializing_if = "Option::is_none")]
             data: Option<&'a GeoRecord>,
             #[serde(skip_serializing_if = "Option::is_none")]
-            error: Option<&'a str>,
+            error: Option<&'a LookupError>,
         }
 
         let profile = self.profile.as_deref().ok_or_else(|| {
@@ -127,16 +133,16 @@ impl<W: Write> Output<W> {
     }
 }
 
-fn render(info: &GeoRecord, label: &str) -> String {
+fn render(info: &GeoRecord, resolved_ip: &str, target: &str) -> String {
     let mut out = String::new();
-    let ip = info.ip.as_deref().unwrap_or(label);
-    let target = label
-        .rsplit_once(" (")
-        .and_then(|(host, rest)| rest.strip_suffix(')').map(|_| host))
-        .unwrap_or(label);
+    let ip = info
+        .ip
+        .as_deref()
+        .filter(|ip| !ip.is_empty())
+        .unwrap_or(resolved_ip);
 
     push_field(&mut out, "IP", ip);
-    if target != ip {
+    if target != ip && target != "current IP" {
         push_field(&mut out, "Target", target);
     }
     push_field(
@@ -249,7 +255,7 @@ mod tests {
             ..GeoRecord::default()
         };
 
-        let output = render(&info, "8.8.8.8");
+        let output = render(&info, "8.8.8.8", "8.8.8.8");
 
         assert!(output.starts_with("  IP:"));
         assert!(output.lines().next().unwrap().ends_with("8.8.8.8"));
@@ -285,7 +291,7 @@ mod tests {
             ..GeoRecord::default()
         };
 
-        let output = render(&info, "example.com (1.2.3.4)");
+        let output = render(&info, "1.2.3.4", "example.com");
 
         assert!(output.contains("IP:"));
         assert!(output.contains("1.2.3.4"));
@@ -297,13 +303,13 @@ mod tests {
     #[test]
     fn omits_missing_or_incomplete_coordinates() {
         let mut info = GeoRecord::default();
-        assert!(!render(&info, "test").contains("Coordinates:"));
+        assert!(!render(&info, "test", "test").contains("Coordinates:"));
 
         info.latitude = Some(0.0);
-        assert!(!render(&info, "test").contains("Coordinates:"));
+        assert!(!render(&info, "test", "test").contains("Coordinates:"));
 
         info.longitude = Some(0.0);
-        assert!(render(&info, "test").contains("0.0000, 0.0000"));
+        assert!(render(&info, "test", "test").contains("0.0000, 0.0000"));
     }
 
     #[test]
@@ -338,8 +344,8 @@ mod tests {
             .emit(&legacy_result(&info), "second", "second")
             .unwrap();
 
-        let first = render(&GeoRecord::default(), "first");
-        let second = render(&GeoRecord::default(), "second");
+        let first = render(&GeoRecord::default(), "first", "first");
+        let second = render(&GeoRecord::default(), "second", "second");
         assert_eq!(
             String::from_utf8(bytes).unwrap(),
             format!("{first}\n{second}")
@@ -448,7 +454,12 @@ mod tests {
         let mut bytes = Vec::new();
         let mut output = Output::for_profile(&mut bytes, true, "custom");
         output.set_provider("rest-json geo.example.invalid");
-        output.emit_error("bad\nname", "cannot resolve").unwrap();
+        output
+            .emit_error(
+                "bad\nname",
+                &LookupError::new(ErrorCode::Dns, "cannot resolve"),
+            )
+            .unwrap();
         let lines: Vec<serde_json::Value> = String::from_utf8(bytes)
             .unwrap()
             .lines()
@@ -459,7 +470,8 @@ mod tests {
         assert_eq!(lines[0]["profile"], "custom");
         assert_eq!(lines[0]["provider"], "rest-json geo.example.invalid");
         assert_eq!(lines[0]["target"], "bad\nname");
-        assert_eq!(lines[0]["error"], "cannot resolve");
+        assert_eq!(lines[0]["error"]["message"], "cannot resolve");
+        assert_eq!(lines[0]["error"]["code"], "dns");
         assert!(lines[0].get("data").is_none());
     }
 

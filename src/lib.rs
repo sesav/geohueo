@@ -3,6 +3,7 @@
 pub mod app;
 mod cli;
 mod config;
+pub mod error;
 pub mod model;
 mod output;
 pub mod provider;

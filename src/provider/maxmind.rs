@@ -8,6 +8,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::Value;
 
 use crate::config::{MaxMindProduct, MaxMindService, MaxMindSettings};
+use crate::error::{ErrorCode, LookupError};
 use crate::model::{GeoRecord, GeoSubdivision, LookupResult, LookupTarget};
 use crate::provider::{Capabilities, GeoProvider};
 use crate::transport::HttpTransport;
@@ -87,17 +88,20 @@ impl Client {
             return Err(api_error(status, code.as_deref()));
         }
         if !is_json(response.headers().get("content-type")) {
-            bail!("MaxMind response is not JSON");
+            return Err(LookupError::new(ErrorCode::Decode, "MaxMind response is not JSON").into());
         }
         let bytes = response
             .body_mut()
             .with_config()
             .limit(MAX_BODY)
             .read_to_vec()
-            .context("could not read MaxMind response")?;
-        let json: Value =
-            serde_json::from_slice(&bytes).context("invalid MaxMind response JSON")?;
+            .map_err(|error| {
+                LookupError::from_http_client(&error, "could not read MaxMind response")
+            })?;
+        let json: Value = serde_json::from_slice(&bytes)
+            .map_err(|_| LookupError::new(ErrorCode::Decode, "invalid MaxMind response JSON"))?;
         normalize(&json, &self.locales)
+            .map_err(|error| LookupError::from_error(&error, ErrorCode::Mapping).into())
     }
 }
 
@@ -147,7 +151,17 @@ fn api_error(status: u16, code: Option<&str>) -> anyhow::Error {
             _ => "service request failed",
         },
     };
-    anyhow!("MaxMind HTTP {status}: {message}")
+    let mut error = LookupError::http(status, format!("MaxMind HTTP {status}: {message}"));
+    error.code = match code {
+        Some("IP_ADDRESS_RESERVED" | "IP_ADDRESS_NOT_FOUND") => ErrorCode::NoData,
+        Some("AUTHORIZATION_INVALID" | "LICENSE_KEY_REQUIRED" | "ACCOUNT_ID_REQUIRED") => {
+            ErrorCode::Authentication
+        }
+        Some("INSUFFICIENT_FUNDS") => ErrorCode::QuotaExceeded,
+        Some("PERMISSION_REQUIRED" | "SERVICE_INVALID") => ErrorCode::PermissionDenied,
+        _ => error.code,
+    };
+    error.into()
 }
 
 fn normalize(json: &Value, locales: &[String]) -> Result<GeoRecord> {
@@ -351,27 +365,34 @@ mod tests {
 
     #[test]
     fn errors_are_classified_without_exposing_server_text_or_secrets() {
-        for (status, body, expected) in [
+        for (status, body, expected, code) in [
             (
                 401,
                 r#"{"code":"AUTHORIZATION_INVALID","error":"test-license"}"#,
                 "credentials",
+                ErrorCode::Authentication,
             ),
             (
                 402,
                 r#"{"code":"INSUFFICIENT_FUNDS","error":"test-license"}"#,
                 "quota",
+                ErrorCode::QuotaExceeded,
             ),
             (
                 404,
                 r#"{"code":"IP_ADDRESS_NOT_FOUND","error":"test-license"}"#,
                 "no geolocation",
+                ErrorCode::NoData,
             ),
             (
                 400,
                 r#"{"code":"IP_ADDRESS_RESERVED","error":"test-license"}"#,
                 "reserved",
+                ErrorCode::NoData,
             ),
+            (403, "{}", "denied", ErrorCode::PermissionDenied),
+            (429, "{}", "rate limited", ErrorCode::RateLimited),
+            (503, "{}", "failed", ErrorCode::Http),
         ] {
             let server = TestServer::new(vec![Response::HttpWithType {
                 status,
@@ -383,6 +404,9 @@ mod tests {
                 server.url(),
             );
             let error = client.lookup(LookupTarget::SelfIp).unwrap_err();
+            let typed = error.downcast_ref::<LookupError>().unwrap();
+            assert_eq!(typed.code, code);
+            assert_eq!(typed.http_status, Some(status));
             assert!(error.to_string().contains(expected));
             assert!(!format!("{error:#}").contains("test-license"));
         }

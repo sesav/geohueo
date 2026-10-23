@@ -11,16 +11,15 @@
 - MaxMind GeoIP/GeoLite web-service profiles with Basic Auth, localized geolocation data, and normalized JSON Lines.
 - Configurable REST/JSON profiles with URL templates, JSON Pointer field mapping, capability checks, and Bearer/Basic/API-key authentication.
 - Explicit `--output normalized-json` for every profile; the existing geoiplookup.io `--json` format remains unchanged.
+- Normalized JSON Lines preserve the original target and include structured errors with stable codes, diagnostic messages, and HTTP status when available.
+- Typed provider errors distinguish timeouts, transport failures, authentication, permissions, quotas, decoding, mapping, and missing data.
 - Validated example profiles and versioned JSONL contracts, covered by automated tests.
 
 ### Changed
 
 - Default text output starts with the selected `Provider` and `Profile`, and each result uses indented `IP`/`Target` fields.
 - Normalized JSON Lines include a top-level `provider` field alongside `profile`.
-
-### Fixed
-
-- Normalized JSON Lines keep the original hostname input in `target` instead of appending the resolved IP.
+- Text output uses the resolved address in `IP` when a provider omits the IP field, including hostname lookups.
 
 ## [0.1.0]
 

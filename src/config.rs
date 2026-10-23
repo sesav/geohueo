@@ -9,6 +9,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::cli::timeout_from_seconds;
+use crate::error::{ErrorCode, LookupError};
 use crate::provider::configurable::{RestProfile, RestSettings};
 use crate::provider::geoiplookup::DEFAULT_TIMEOUT;
 
@@ -148,6 +149,11 @@ pub(crate) struct Config {
 impl Config {
     /// An absent implicit configuration is allowed; a missing explicit path is not.
     pub fn load(explicit: Option<&Path>, env_path: Option<OsString>) -> Result<Self> {
+        Self::load_inner(explicit, env_path)
+            .map_err(|error| LookupError::from_error(&error, ErrorCode::Config).into())
+    }
+
+    fn load_inner(explicit: Option<&Path>, env_path: Option<OsString>) -> Result<Self> {
         let (path, required) = if let Some(path) = explicit {
             (Some(path.to_path_buf()), true)
         } else if let Some(path) = env_path {
@@ -277,6 +283,16 @@ impl Config {
         env_profile: Option<OsString>,
         cli_timeout: Option<Duration>,
     ) -> Result<SelectedProfile> {
+        self.select_inner(cli_profile, env_profile, cli_timeout)
+            .map_err(|error| LookupError::from_error(&error, ErrorCode::Config).into())
+    }
+
+    fn select_inner(
+        &self,
+        cli_profile: Option<&str>,
+        env_profile: Option<OsString>,
+        cli_timeout: Option<Duration>,
+    ) -> Result<SelectedProfile> {
         let env_profile = if cli_profile.is_some() {
             None
         } else {
@@ -323,9 +339,9 @@ impl Config {
                 } = auth;
                 let account_id = read_secret(username_env)?;
                 if !account_id.chars().all(|c| c.is_ascii_digit()) {
-                    bail!(
+                    return Err(LookupError::new(ErrorCode::Credentials, format!(
                         "credential environment variable {username_env} must contain a numeric account ID"
-                    );
+                    )).into());
                 }
                 Adapter::Maxmind(MaxMindSettings {
                     service: *service,
@@ -374,6 +390,11 @@ pub(crate) fn validate_env_name(name: &str) -> Result<()> {
 }
 
 pub(crate) fn read_secret(name: &str) -> Result<String> {
+    read_secret_inner(name)
+        .map_err(|error| LookupError::from_error(&error, ErrorCode::Credentials).into())
+}
+
+fn read_secret_inner(name: &str) -> Result<String> {
     let value = env::var_os(name)
         .ok_or_else(|| anyhow!("credential environment variable {name} is not set"))?
         .into_string()

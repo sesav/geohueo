@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{ErrorCode, LookupError};
 use crate::model::{GeoRecord, LookupResult, LookupTarget};
 use crate::provider::{Capabilities, GeoProvider};
 use crate::transport::HttpTransport;
@@ -95,7 +96,9 @@ impl GeoProvider for Client {
             LookupTarget::SelfIp => None,
             LookupTarget::Ip(ip) => Some(ip),
         };
-        let info = self.lookup_response(ip)?;
+        let info = self
+            .lookup_response(ip)
+            .map_err(|error| LookupError::from_error(&error, ErrorCode::Decode))?;
         let record = GeoRecord::from(&info);
         let legacy_json = serde_json::to_string(&info).context("could not serialize response")?;
         Ok(LookupResult::new(record, info.success).with_legacy_json(legacy_json))

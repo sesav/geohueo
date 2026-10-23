@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 
+use crate::error::LookupError;
+
 /// Reusable HTTP connection and request timeout shared by providers.
 pub(crate) struct HttpTransport {
     agent: ureq::Agent,
@@ -48,7 +50,7 @@ impl HttpTransport {
             .get(url)
             .header("Authorization", authorization)
             .call()
-            .with_context(|| format!("request to {url} failed"))
+            .map_err(|error| LookupError::from_http_client(&error, "MaxMind request failed").into())
     }
 
     /// No redirects, status errors or URLs in diagnostics: configured query parameters may
@@ -76,9 +78,9 @@ impl HttpTransport {
         } else {
             request
         };
-        request
-            .call()
-            .map_err(|_| anyhow::anyhow!("REST/JSON request failed (connection or timeout)"))
+        request.call().map_err(|error| {
+            LookupError::from_http_client(&error, "REST/JSON request failed").into()
+        })
     }
 
     #[cfg(test)]
