@@ -93,19 +93,37 @@ fn run(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<u8> {
+    let provider_label = profile.provider_label();
+
     match profile.adapter {
         Adapter::Geoiplookup => {
             let client = Client::new(profile.timeout);
-            let name = args.normalized_json.then_some(profile.name.as_str());
-            run_with_provider(args, &client, name, stdout, stderr)
+            // The legacy JSON contract has no profile field, so keep it in its
+            // original mode. Text output and normalized JSON can identify it.
+            let name = (args.normalized_json || !args.json).then_some(profile.name.as_str());
+            run_with_provider(args, &client, name, Some(&provider_label), stdout, stderr)
         }
         Adapter::Maxmind(settings) => {
             let client = maxmind::Client::new(settings, profile.timeout);
-            run_with_provider(args, &client, Some(&profile.name), stdout, stderr)
+            run_with_provider(
+                args,
+                &client,
+                Some(&profile.name),
+                Some(&provider_label),
+                stdout,
+                stderr,
+            )
         }
         Adapter::RestJson(settings) => {
             let client = configurable::Client::new(*settings, profile.timeout);
-            run_with_provider(args, &client, Some(&profile.name), stdout, stderr)
+            run_with_provider(
+                args,
+                &client,
+                Some(&profile.name),
+                Some(&provider_label),
+                stdout,
+                stderr,
+            )
         }
     }
 }
@@ -114,6 +132,7 @@ fn run_with_provider(
     args: Args,
     provider: &dyn GeoProvider,
     profile: Option<&str>,
+    provider_label: Option<&str>,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<u8> {
@@ -122,11 +141,23 @@ fn run_with_provider(
         (false, Some(name)) => Output::for_profile(stdout, args.json, name),
         (false, None) => Output::new(stdout, args.json),
     };
+    if let Some(label) = provider_label {
+        output.set_provider(label);
+    }
+    output.write_header()?;
     let mut failed = false;
     let mut unsupported = false;
 
     if args.targets.is_empty() {
-        return Ok(lookup(provider, None, "current IP", &mut output, stderr)?.exit_code());
+        return Ok(lookup(
+            provider,
+            None,
+            "current IP",
+            "current IP",
+            &mut output,
+            stderr,
+        )?
+        .exit_code());
     }
 
     for input in &args.targets {
@@ -144,6 +175,7 @@ fn run_with_provider(
             provider,
             Some(target.ip()),
             &target.label(),
+            input,
             &mut output,
             stderr,
         )? {
@@ -176,20 +208,21 @@ fn lookup(
     provider: &dyn GeoProvider,
     ip: Option<IpAddr>,
     label: &str,
+    target: &str,
     output: &mut Output<impl Write>,
     stderr: &mut impl Write,
 ) -> Result<LookupStatus> {
-    let target = ip.map_or(LookupTarget::SelfIp, LookupTarget::Ip);
-    if !provider.capabilities().supports(target) {
+    let lookup_target = ip.map_or(LookupTarget::SelfIp, LookupTarget::Ip);
+    if !provider.capabilities().supports(lookup_target) {
         let message = "target is not supported by this profile";
-        output.emit_error(label, message)?;
+        output.emit_error(target, message)?;
         writeln!(stderr, "geohueo: {label}: {message}")?;
         return Ok(LookupStatus::Unsupported);
     }
-    let info = match provider.lookup(target) {
+    let info = match provider.lookup(lookup_target) {
         Ok(info) => info,
         Err(error) => {
-            output.emit_error(label, &format!("{error:#}"))?;
+            output.emit_error(target, &format!("{error:#}"))?;
             writeln!(stderr, "geohueo: {label}: lookup failed: {error:#}")?;
             return Ok(LookupStatus::Failure);
         }
@@ -201,7 +234,7 @@ fn lookup(
         label
     };
     output
-        .emit(&info, display_label, label)
+        .emit(&info, display_label, target)
         .with_context(|| format!("could not write result for {display_label} to stdout"))?;
 
     if !info.success {
@@ -272,7 +305,8 @@ mod tests {
             ..Args::default()
         };
 
-        let code = run_with_provider(args, &provider, None, &mut stdout, &mut stderr).unwrap();
+        let code =
+            run_with_provider(args, &provider, None, None, &mut stdout, &mut stderr).unwrap();
 
         assert_eq!(code, 0);
         assert!(stderr.is_empty());
@@ -299,12 +333,54 @@ mod tests {
         let mut stderr = Vec::new();
 
         assert_eq!(
-            run_with_provider(Args::default(), &provider, None, &mut stdout, &mut stderr).unwrap(),
+            run_with_provider(
+                Args::default(),
+                &provider,
+                None,
+                None,
+                &mut stdout,
+                &mut stderr
+            )
+            .unwrap(),
             0
         );
         assert!(stderr.is_empty());
-        assert!(String::from_utf8(stdout).unwrap().starts_with("9.9.9.9\n"));
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .starts_with("  IP:              9.9.9.9\n")
+        );
         assert_eq!(*provider.targets.borrow(), [LookupTarget::SelfIp]);
+    }
+
+    #[test]
+    fn normalized_json_keeps_original_hostname_input_as_target() {
+        let provider = StubProvider {
+            targets: RefCell::new(Vec::new()),
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+
+        let code = run_with_provider(
+            Args {
+                normalized_json: true,
+                targets: vec!["localhost".to_string()],
+                ..Args::default()
+            },
+            &provider,
+            Some("test"),
+            Some("rest-json test"),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(code, 0);
+        assert!(stderr.is_empty());
+        let line: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(line["profile"], "test");
+        assert_eq!(line["provider"], "rest-json test");
+        assert_eq!(line["target"], "localhost");
     }
 
     #[test]
@@ -322,6 +398,7 @@ mod tests {
                     ..Args::default()
                 },
                 &server.client(),
+                None,
                 None,
                 &mut stdout,
                 &mut stderr,
@@ -350,6 +427,7 @@ mod tests {
                     ..Args::default()
                 },
                 &unavailable_client(),
+                None,
                 None,
                 &mut stdout,
                 &mut stderr,
@@ -385,6 +463,7 @@ mod tests {
                 ..Args::default()
             },
             &server.client(),
+            None,
             None,
             &mut stdout,
             &mut stderr,
@@ -443,6 +522,7 @@ mod tests {
             },
             &client,
             Some("maxmind"),
+            Some("maxmind geoip country"),
             &mut stdout,
             &mut stderr,
         )
@@ -466,6 +546,7 @@ mod tests {
         );
         assert_eq!(lines[2]["schema_version"], 1);
         assert_eq!(lines[2]["profile"], "maxmind");
+        assert_eq!(lines[2]["provider"], "maxmind geoip country");
         assert_eq!(lines[2]["data"]["country_code"], "AU");
         assert_eq!(lines[2]["success"], true);
         assert_eq!(
@@ -508,6 +589,7 @@ mod tests {
                 },
                 &client,
                 Some("mm"),
+                Some("maxmind geoip country"),
                 &mut stdout,
                 &mut stderr
             )
@@ -516,6 +598,8 @@ mod tests {
         );
         let json: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
         assert_eq!(json["target"], "current IP");
+        assert_eq!(json["profile"], "mm");
+        assert_eq!(json["provider"], "maxmind geoip country");
         assert_eq!(json["data"]["ip"], "8.8.8.8");
         assert_eq!(server.requests(), ["GET /geoip/v2.1/country/me HTTP/1.1"]);
         assert!(stderr.is_empty());
@@ -527,13 +611,18 @@ mod tests {
                 Args::default(),
                 &client,
                 Some("mm"),
+                Some("maxmind geoip country"),
                 &mut stdout,
                 &mut stderr
             )
             .unwrap(),
             0
         );
-        assert!(String::from_utf8(stdout).unwrap().starts_with("8.8.8.8\n"));
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .starts_with("  Provider:        maxmind geoip country\n  Profile:         mm\n  IP:              8.8.8.8\n")
+        );
     }
 
     struct FailingWriter(io::ErrorKind);

@@ -13,6 +13,15 @@
 - Explicit `--output normalized-json` for every profile; the existing geoiplookup.io `--json` format remains unchanged.
 - Validated example profiles and versioned JSONL contracts, covered by automated tests.
 
+### Changed
+
+- Default text output starts with the selected `Provider` and `Profile`, and each result uses indented `IP`/`Target` fields.
+- Normalized JSON Lines include a top-level `provider` field alongside `profile`.
+
+### Fixed
+
+- Normalized JSON Lines keep the original hostname input in `target` instead of appending the resolved IP.
+
 ## [0.1.0]
 
 Initial release.

@@ -9,7 +9,9 @@ pub struct Output<W> {
     writer: W,
     json: bool,
     first: bool,
+    header_printed: bool,
     profile: Option<String>,
+    provider: Option<String>,
 }
 
 impl<W: Write> Output<W> {
@@ -18,7 +20,9 @@ impl<W: Write> Output<W> {
             writer,
             json,
             first: true,
+            header_printed: false,
             profile: None,
+            provider: None,
         }
     }
 
@@ -26,6 +30,32 @@ impl<W: Write> Output<W> {
         let mut output = Self::new(writer, json);
         output.profile = Some(profile.to_string());
         output
+    }
+
+    pub fn set_provider(&mut self, provider: &str) {
+        self.provider = Some(provider.to_string());
+    }
+
+    /// Text output starts with the selected provider and profile, before any
+    /// lookup result. This is also visible when every lookup fails.
+    pub fn write_header(&mut self) -> io::Result<()> {
+        if self.json || self.header_printed {
+            return Ok(());
+        }
+        let Some(profile) = self.profile.as_deref() else {
+            return Ok(());
+        };
+
+        let mut header = String::new();
+        push_field(
+            &mut header,
+            "Provider",
+            self.provider.as_deref().unwrap_or(""),
+        );
+        push_field(&mut header, "Profile", profile);
+        write!(self.writer, "{header}")?;
+        self.header_printed = true;
+        Ok(())
     }
 
     /// The built-in legacy mode keeps its original response (including `success: false`).
@@ -68,6 +98,8 @@ impl<W: Write> Output<W> {
         struct Line<'a> {
             schema_version: u8,
             profile: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            provider: Option<&'a str>,
             target: &'a str,
             success: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,6 +116,7 @@ impl<W: Write> Output<W> {
             &Line {
                 schema_version: 1,
                 profile,
+                provider: self.provider.as_deref(),
                 target,
                 success,
                 data,
@@ -96,9 +129,16 @@ impl<W: Write> Output<W> {
 
 fn render(info: &GeoRecord, label: &str) -> String {
     let mut out = String::new();
-    out.push_str(label);
-    out.push('\n');
+    let ip = info.ip.as_deref().unwrap_or(label);
+    let target = label
+        .rsplit_once(" (")
+        .and_then(|(host, rest)| rest.strip_suffix(')').map(|_| host))
+        .unwrap_or(label);
 
+    push_field(&mut out, "IP", ip);
+    if target != ip {
+        push_field(&mut out, "Target", target);
+    }
     push_field(
         &mut out,
         "Country",
@@ -205,12 +245,47 @@ mod tests {
 
         let output = render(&info, "8.8.8.8");
 
-        assert!(output.starts_with("8.8.8.8\n"));
+        assert!(output.starts_with("  IP:"));
+        assert!(output.lines().next().unwrap().ends_with("8.8.8.8"));
         assert!(output.contains("Country:"));
         assert!(output.contains("United States (US)"));
         assert!(output.contains("37.4220, -122.0850"));
         assert!(!output.contains("Timezone:"));
         assert!(!output.contains("ASN:"));
+    }
+
+    #[test]
+    fn text_header_identifies_provider_and_profile() {
+        let mut bytes = Vec::new();
+        let mut output = Output::for_profile(&mut bytes, false, "maxmind-geolite");
+        output.set_provider("maxmind geolite country");
+
+        output.write_header().unwrap();
+        output.write_header().unwrap();
+
+        let text = String::from_utf8(bytes).unwrap();
+        assert!(text.contains("Provider:"));
+        assert!(text.contains("maxmind geolite country"));
+        assert!(text.contains("Profile:"));
+        assert!(text.contains("maxmind-geolite"));
+        assert_eq!(text.matches("Provider:").count(), 1);
+        assert_eq!(text.matches("Profile:").count(), 1);
+    }
+
+    #[test]
+    fn renders_hostname_target_and_resolved_ip_separately() {
+        let info = GeoRecord {
+            ip: Some("1.2.3.4".to_string()),
+            ..GeoRecord::default()
+        };
+
+        let output = render(&info, "example.com (1.2.3.4)");
+
+        assert!(output.contains("IP:"));
+        assert!(output.contains("1.2.3.4"));
+        assert!(output.contains("Target:"));
+        assert!(output.contains("example.com"));
+        assert!(!output.contains("example.com (1.2.3.4)"));
     }
 
     #[test]
@@ -257,7 +332,12 @@ mod tests {
             .emit(&legacy_result(&info), "second", "second")
             .unwrap();
 
-        assert_eq!(String::from_utf8(bytes).unwrap(), "first\n\nsecond\n");
+        let first = render(&GeoRecord::default(), "first");
+        let second = render(&GeoRecord::default(), "second");
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            format!("{first}\n{second}")
+        );
     }
 
     #[test]
@@ -328,7 +408,9 @@ mod tests {
             ..GeoRecord::default()
         };
         let mut normalized = Vec::new();
-        Output::for_profile(&mut normalized, true, "maxmind")
+        let mut output = Output::for_profile(&mut normalized, true, "maxmind");
+        output.set_provider("maxmind geoip city");
+        output
             .emit(&LookupResult::new(record, true), "8.8.8.8", "8.8.8.8")
             .unwrap();
         assert_eq!(
@@ -341,7 +423,9 @@ mod tests {
             success: false,
             ..info
         };
-        Output::for_profile(&mut failure, true, "geoiplookup")
+        let mut output = Output::for_profile(&mut failure, true, "geoiplookup");
+        output.set_provider("geoiplookup.io");
+        output
             .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
             .unwrap();
         assert_eq!(
@@ -354,6 +438,7 @@ mod tests {
     fn normalized_errors_have_no_data_and_keep_escaped_input_per_line() {
         let mut bytes = Vec::new();
         let mut output = Output::for_profile(&mut bytes, true, "custom");
+        output.set_provider("rest-json geo.example.invalid");
         output.emit_error("bad\nname", "cannot resolve").unwrap();
         let lines: Vec<serde_json::Value> = String::from_utf8(bytes)
             .unwrap()
@@ -362,6 +447,8 @@ mod tests {
             .collect();
         assert_eq!(lines.len(), 1);
         assert_eq!(lines[0]["schema_version"], 1);
+        assert_eq!(lines[0]["profile"], "custom");
+        assert_eq!(lines[0]["provider"], "rest-json geo.example.invalid");
         assert_eq!(lines[0]["target"], "bad\nname");
         assert_eq!(lines[0]["error"], "cannot resolve");
         assert!(lines[0].get("data").is_none());

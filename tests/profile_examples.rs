@@ -34,6 +34,14 @@ fn shipped_profile_examples_validate_without_network_and_load_only_selected_secr
             ],
         ),
         (
+            "maxmind-geolite-city.toml",
+            "geolite",
+            [
+                ("MAXMIND_ACCOUNT_ID", "123456"),
+                ("MAXMIND_LICENSE_KEY", "example-key"),
+            ],
+        ),
+        (
             "rest-path.toml",
             "custom",
             [("CUSTOM_GEO_TOKEN", "example-token"), ("", "")],

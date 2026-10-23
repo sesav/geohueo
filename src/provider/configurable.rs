@@ -132,6 +132,16 @@ pub(crate) struct RestSettings {
     credential: Credential,
 }
 
+impl RestSettings {
+    pub(crate) fn provider_label(&self) -> String {
+        let host = self.base_url.host_str().unwrap_or("unknown");
+        match self.base_url.port() {
+            Some(port) => format!("rest-json {host}:{port}"),
+            None => format!("rest-json {host}"),
+        }
+    }
+}
+
 impl RestProfile {
     pub fn validate(&self) -> Result<()> {
         let Method::Get = self.request.method;
@@ -805,6 +815,14 @@ asn_number = "asn_to_number"
     fn client(text: &str, server: &TestServer, secret: &str) -> Client {
         let settings = profile(text).resolve_with(|_| Ok(secret.into())).unwrap();
         Client::for_test(settings, &server.url())
+    }
+
+    #[test]
+    fn provider_label_names_rest_origin() {
+        let settings = profile(PATH_PROFILE)
+            .resolve_with(|_| Ok("secret-token".into()))
+            .unwrap();
+        assert_eq!(settings.provider_label(), "rest-json fixture.invalid");
     }
 
     #[test]

@@ -519,7 +519,11 @@ fn configured_alias_uses_the_existing_lookup_path() {
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("Provider:"));
+    assert!(stdout.contains("geoiplookup.io"));
+    assert!(stdout.contains("Profile:"));
+    assert!(stdout.contains("personal"));
     assert!(
         String::from_utf8(output.stderr)
             .unwrap()

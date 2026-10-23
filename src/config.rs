@@ -69,12 +69,31 @@ pub(crate) enum MaxMindService {
     Geolite,
 }
 
+impl MaxMindService {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Geoip => "geoip",
+            Self::Geolite => "geolite",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub(crate) enum MaxMindProduct {
     Country,
     City,
     Insights,
+}
+
+impl MaxMindProduct {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Country => "country",
+            Self::City => "city",
+            Self::Insights => "insights",
+        }
+    }
 }
 
 pub(crate) struct MaxMindSettings {
@@ -106,6 +125,20 @@ pub(crate) struct SelectedProfile {
     pub name: String,
     pub adapter: Adapter,
     pub timeout: Duration,
+}
+
+impl SelectedProfile {
+    pub fn provider_label(&self) -> String {
+        match &self.adapter {
+            Adapter::Geoiplookup => "geoiplookup.io".to_string(),
+            Adapter::Maxmind(settings) => format!(
+                "maxmind {} {}",
+                settings.service.as_str(),
+                settings.product.as_str()
+            ),
+            Adapter::RestJson(settings) => settings.provider_label(),
+        }
+    }
 }
 
 pub(crate) struct Config {
@@ -389,6 +422,29 @@ mod tests {
 
     fn parse(input: &str) -> Result<Config> {
         Config::from_file(toml::from_str(input)?)
+    }
+
+    #[test]
+    fn provider_labels_describe_configured_adapters() {
+        let maxmind = SelectedProfile {
+            name: "mm".to_string(),
+            adapter: Adapter::Maxmind(MaxMindSettings {
+                service: MaxMindService::Geolite,
+                product: MaxMindProduct::Country,
+                locales: vec!["en".to_string()],
+                account_id: "123456".to_string(),
+                license_key: "test-key".to_string(),
+            }),
+            timeout: DEFAULT_TIMEOUT,
+        };
+        assert_eq!(maxmind.provider_label(), "maxmind geolite country");
+
+        let geoiplookup = SelectedProfile {
+            name: "geoiplookup".to_string(),
+            adapter: Adapter::Geoiplookup,
+            timeout: DEFAULT_TIMEOUT,
+        };
+        assert_eq!(geoiplookup.provider_label(), "geoiplookup.io");
     }
 
     #[test]
