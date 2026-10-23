@@ -32,7 +32,7 @@ fn main() -> ExitCode {
         // A consumer such as `head` may close the pipe before we finish writing.
         Err(error) if is_broken_pipe(&error) => ExitCode::SUCCESS,
         Err(error) => {
-            let _ = writeln!(stderr, "geolkp: {error:#}");
+            let _ = writeln!(stderr, "geohueo: {error:#}");
             ExitCode::FAILURE
         }
     }
@@ -52,8 +52,8 @@ fn execute(
     let command = match cli::parse_args(args) {
         Ok(command) => command,
         Err(message) => {
-            writeln!(stderr, "geolkp: {message}")?;
-            writeln!(stderr, "Try 'geolkp --help' for more information.")?;
+            writeln!(stderr, "geohueo: {message}")?;
+            writeln!(stderr, "Try 'geohueo --help' for more information.")?;
             return Ok(2);
         }
     };
@@ -64,7 +64,7 @@ fn execute(
             Ok(0)
         }
         Command::Version => {
-            writeln!(stdout, "geolkp {}", env!("CARGO_PKG_VERSION"))
+            writeln!(stdout, "geohueo {}", env!("CARGO_PKG_VERSION"))
                 .context("could not write version to stdout")?;
             Ok(0)
         }
@@ -95,7 +95,7 @@ fn run_with_client(
         let target = match resolve(input, args.family) {
             Ok(target) => target,
             Err(message) => {
-                writeln!(stderr, "geolkp: {message}")?;
+                writeln!(stderr, "geohueo: {message}")?;
                 failed = true;
                 continue;
             }
@@ -125,7 +125,7 @@ fn lookup(
     let info = match client.lookup(ip) {
         Ok(info) => info,
         Err(error) => {
-            writeln!(stderr, "geolkp: {label}: lookup failed: {error:#}")?;
+            writeln!(stderr, "geohueo: {label}: lookup failed: {error:#}")?;
             return Ok(false);
         }
     };
@@ -142,7 +142,7 @@ fn lookup(
     if !info.success {
         writeln!(
             stderr,
-            "geolkp: {label}: {}",
+            "geohueo: {label}: {}",
             no_data_message(ip.or_else(|| info.ip.parse().ok()))
         )?;
     }

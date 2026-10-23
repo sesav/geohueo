@@ -5,12 +5,12 @@ use crate::api::DEFAULT_TIMEOUT;
 use crate::target::AddressFamily;
 
 pub const HELP: &str = concat!(
-    "geolkp ",
+    "geohueo ",
     env!("CARGO_PKG_VERSION"),
     "\n",
     "IP geolocation via geoiplookup.io\n",
     "\n",
-    "Usage: geolkp [OPTIONS] [HOST...]\n",
+    "Usage: geohueo [OPTIONS] [HOST...]\n",
     "\n",
     "Arguments:\n",
     "  HOST...  IPv4/IPv6 address or hostname to look up.\n",

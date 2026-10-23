@@ -50,7 +50,7 @@ impl Client {
     pub fn new(timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()
             .timeout_global(Some(timeout))
-            .user_agent(concat!("geolkp/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("geohueo/", env!("CARGO_PKG_VERSION")))
             .build();
 
         Self {
