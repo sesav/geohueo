@@ -1,14 +1,14 @@
 use std::ffi::OsString;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use crate::api::DEFAULT_TIMEOUT;
 use crate::target::AddressFamily;
 
 pub const HELP: &str = concat!(
     "geohueo ",
     env!("CARGO_PKG_VERSION"),
     "\n",
-    "IP geolocation via geoiplookup.io\n",
+    "IP geolocation via configurable providers\n",
     "\n",
     "Usage: geohueo [OPTIONS] [HOST...]\n",
     "\n",
@@ -20,19 +20,27 @@ pub const HELP: &str = concat!(
     "  -4, --ipv4         Resolve hostnames to IPv4 only\n",
     "  -6, --ipv6         Resolve hostnames to IPv6 only\n",
     "      --timeout SEC  HTTP timeout in positive whole seconds (default: 10)\n",
-    "  -j, --json         Print one JSON object per line\n",
+    "      --config PATH  Load configuration from PATH\n",
+    "      --profile NAME Use the named provider profile\n",
+    "      --check-config  Validate configuration without a lookup\n",
+    "      --list-profiles List configured provider profiles\n",
+    "  -j, --json         Print JSON Lines (legacy format for geoiplookup.io)\n",
+    "      --output normalized-json  Print versioned, normalized JSON Lines for any profile\n",
     "  -h, --help         Print help\n",
     "  -V, --version      Print version\n",
     "  --                 Stop parsing options\n",
     "\n",
-    "Data: https://geoiplookup.io/api\n",
+    "Default data: https://geoiplookup.io/api\n",
 );
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub json: bool,
+    pub normalized_json: bool,
     pub family: AddressFamily,
-    pub timeout: Duration,
+    pub timeout: Option<Duration>,
+    pub config: Option<PathBuf>,
+    pub profile: Option<String>,
     pub targets: Vec<String>,
 }
 
@@ -40,8 +48,11 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             json: false,
+            normalized_json: false,
             family: AddressFamily::Any,
-            timeout: DEFAULT_TIMEOUT,
+            timeout: None,
+            config: None,
+            profile: None,
             targets: Vec::new(),
         }
     }
@@ -50,6 +61,8 @@ impl Default for Args {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     Run(Args),
+    CheckConfig(Args),
+    ListProfiles(Args),
     Help,
     Version,
 }
@@ -57,6 +70,7 @@ pub enum Command {
 pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, String> {
     let mut parsed = Args::default();
     let mut positional_only = false;
+    let mut command = None;
     let mut args = args.into_iter().map(|arg| {
         arg.into_string()
             .map_err(|arg| format!("argument is not valid UTF-8: {arg:?}"))
@@ -70,7 +84,24 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                 "-h" | "--help" => return Ok(Command::Help),
                 "-V" | "--version" => return Ok(Command::Version),
                 "-j" | "--json" => {
+                    if parsed.normalized_json {
+                        return Err(
+                            "options '--json' and '--output' cannot be used together".to_string()
+                        );
+                    }
                     parsed.json = true;
+                    continue;
+                }
+                "--output" => {
+                    let value = args
+                        .next()
+                        .transpose()?
+                        .ok_or("option '--output' requires a format")?;
+                    set_output(&mut parsed, &value)?;
+                    continue;
+                }
+                value if value.starts_with("--output=") => {
+                    set_output(&mut parsed, &value["--output=".len()..])?;
                     continue;
                 }
                 "-4" | "--ipv4" | "-6" | "--ipv6" => {
@@ -91,11 +122,43 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                         .next()
                         .transpose()?
                         .ok_or("option '--timeout' requires a value in seconds")?;
-                    parsed.timeout = parse_timeout(&value)?;
+                    parsed.timeout = Some(parse_timeout(&value)?);
                     continue;
                 }
                 value if value.starts_with("--timeout=") => {
-                    parsed.timeout = parse_timeout(&value["--timeout=".len()..])?;
+                    parsed.timeout = Some(parse_timeout(&value["--timeout=".len()..])?);
+                    continue;
+                }
+                "--config" => {
+                    let value = args
+                        .next()
+                        .transpose()?
+                        .ok_or("option '--config' requires a path")?;
+                    parsed.config = Some(parse_path(&value)?);
+                    continue;
+                }
+                value if value.starts_with("--config=") => {
+                    parsed.config = Some(parse_path(&value["--config=".len()..])?);
+                    continue;
+                }
+                "--profile" => {
+                    let value = args
+                        .next()
+                        .transpose()?
+                        .ok_or("option '--profile' requires a name")?;
+                    parsed.profile = Some(parse_profile(&value)?);
+                    continue;
+                }
+                value if value.starts_with("--profile=") => {
+                    parsed.profile = Some(parse_profile(&value["--profile=".len()..])?);
+                    continue;
+                }
+                "--check-config" => {
+                    set_command(&mut command, "--check-config")?;
+                    continue;
+                }
+                "--list-profiles" => {
+                    set_command(&mut command, "--list-profiles")?;
                     continue;
                 }
                 "--" => {
@@ -112,7 +175,68 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
         parsed.targets.push(arg);
     }
 
-    Ok(Command::Run(parsed))
+    match command {
+        None => Ok(Command::Run(parsed)),
+        Some(option) => {
+            if !parsed.targets.is_empty() {
+                return Err(format!("option '{option}' cannot be used with targets"));
+            }
+            if parsed.json || parsed.normalized_json || parsed.family != AddressFamily::Any {
+                return Err(format!(
+                    "option '{option}' cannot be used with output or DNS options"
+                ));
+            }
+            if option == "--list-profiles" && (parsed.profile.is_some() || parsed.timeout.is_some())
+            {
+                return Err(
+                    "option '--list-profiles' cannot be used with '--profile' or '--timeout'"
+                        .to_string(),
+                );
+            }
+            if option == "--check-config" {
+                Ok(Command::CheckConfig(parsed))
+            } else {
+                Ok(Command::ListProfiles(parsed))
+            }
+        }
+    }
+}
+
+fn set_output(args: &mut Args, value: &str) -> Result<(), String> {
+    if value != "normalized-json" {
+        return Err(format!(
+            "invalid value for '--output': '{value}' (expected normalized-json)"
+        ));
+    }
+    if args.json {
+        return Err("options '--json' and '--output' cannot be used together".to_string());
+    }
+    args.normalized_json = true;
+    Ok(())
+}
+
+fn set_command(current: &mut Option<&'static str>, option: &'static str) -> Result<(), String> {
+    if current.is_some_and(|current| current != option) {
+        return Err(
+            "options '--check-config' and '--list-profiles' cannot be used together".to_string(),
+        );
+    }
+    *current = Some(option);
+    Ok(())
+}
+
+fn parse_path(value: &str) -> Result<PathBuf, String> {
+    if value.is_empty() {
+        return Err("option '--config' requires a non-empty path".to_string());
+    }
+    Ok(PathBuf::from(value))
+}
+
+fn parse_profile(value: &str) -> Result<String, String> {
+    if value.is_empty() || value.trim() != value || value.chars().any(char::is_control) {
+        return Err("option '--profile' requires a valid non-empty name".to_string());
+    }
+    Ok(value.to_string())
 }
 
 fn parse_timeout(value: &str) -> Result<Duration, String> {
@@ -122,12 +246,12 @@ fn parse_timeout(value: &str) -> Result<Duration, String> {
         )
     };
     let seconds = value.parse::<u64>().map_err(|_| invalid())?;
-    let timeout = Duration::from_secs(seconds);
-    if timeout.is_zero() || Instant::now().checked_add(timeout).is_none() {
-        return Err(invalid());
-    }
+    timeout_from_seconds(seconds).ok_or_else(invalid)
+}
 
-    Ok(timeout)
+pub(crate) fn timeout_from_seconds(seconds: u64) -> Option<Duration> {
+    let timeout = Duration::from_secs(seconds);
+    (!timeout.is_zero() && Instant::now().checked_add(timeout).is_some()).then_some(timeout)
 }
 
 #[cfg(test)]
@@ -215,7 +339,7 @@ mod tests {
             assert_eq!(
                 parse(&args).unwrap(),
                 Command::Run(Args {
-                    timeout: Duration::from_secs(5),
+                    timeout: Some(Duration::from_secs(5)),
                     ..Args::default()
                 })
             );
@@ -232,11 +356,39 @@ mod tests {
             parse(&["8.8.8.8", "--timeout", "1", "-6", "example.com", "--json"]).unwrap(),
             Command::Run(Args {
                 json: true,
+                normalized_json: false,
                 family: AddressFamily::Ipv6,
-                timeout: Duration::from_secs(1),
+                timeout: Some(Duration::from_secs(1)),
+                config: None,
+                profile: None,
                 targets: vec!["8.8.8.8".to_string(), "example.com".to_string()],
             })
         );
+    }
+
+    #[test]
+    fn normalized_json_output_is_explicit_and_conflicts_with_legacy_flag() {
+        for option in [
+            vec!["--output", "normalized-json"],
+            vec!["--output=normalized-json"],
+        ] {
+            assert_eq!(
+                parse(&option).unwrap(),
+                Command::Run(Args {
+                    normalized_json: true,
+                    ..Args::default()
+                })
+            );
+        }
+        for options in [
+            vec!["--output"],
+            vec!["--output=other"],
+            vec!["--json", "--output=normalized-json"],
+            vec!["--output=normalized-json", "-j"],
+            vec!["--check-config", "--output=normalized-json"],
+        ] {
+            assert!(parse(&options).is_err(), "accepted {options:?}");
+        }
     }
 
     #[test]
@@ -274,6 +426,50 @@ mod tests {
     #[test]
     fn rejects_unknown_option() {
         assert!(parse(&["--wat"]).is_err());
+    }
+
+    #[test]
+    fn parses_configuration_options_in_both_forms() {
+        assert_eq!(
+            parse(&["--config=./settings.toml", "--profile", "personal"]).unwrap(),
+            Command::Run(Args {
+                config: Some(PathBuf::from("./settings.toml")),
+                profile: Some("personal".to_string()),
+                ..Args::default()
+            })
+        );
+        assert_eq!(
+            parse(&["--config", "./settings.toml", "--profile=personal"]),
+            parse(&["--config=./settings.toml", "--profile", "personal"])
+        );
+        assert_eq!(
+            parse(&["--check-config", "--profile=personal"]).unwrap(),
+            Command::CheckConfig(Args {
+                profile: Some("personal".to_string()),
+                ..Args::default()
+            })
+        );
+        assert_eq!(
+            parse(&["--list-profiles"]).unwrap(),
+            Command::ListProfiles(Args::default())
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_configuration_options() {
+        for args in [
+            vec!["--config"],
+            vec!["--config="],
+            vec!["--profile"],
+            vec!["--profile="],
+            vec!["--check-config", "8.8.8.8"],
+            vec!["--list-profiles", "--", "8.8.8.8"],
+            vec!["--check-config", "--list-profiles"],
+            vec!["--check-config", "--json"],
+            vec!["--list-profiles", "--profile", "personal"],
+        ] {
+            assert!(parse(&args).is_err(), "unexpectedly accepted {args:?}");
+        }
     }
 
     #[cfg(unix)]

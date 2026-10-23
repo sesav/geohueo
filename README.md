@@ -1,199 +1,278 @@
 # geohueo
 
-A command-line tool for finding IPv4/IPv6 and hostname locations using [geoiplookup.io](https://geoiplookup.io/api).
+geohueo is a command-line tool for looking up geolocation and network information for IP addresses and hostnames. It
+uses geoiplookup.io by default and requires no configuration or API credentials to get started.
 
-Since there wasn't a clear, easy tool for domain or IP info, I just built a small utility for fun. Hoping it helps
-others as well.
+Provider profiles support MaxMind's free GeoLite and paid GeoIP web services, as well as custom HTTP GET APIs that
+return JSON. Configure profiles in TOML, select one per lookup, or set a default provider for subsequent lookups.
 
-## Build
+## Install
 
 Requires Rust 1.85+.
-
-```sh
-cargo build --release
-```
-
-The binary is `target/release/geohueo`. Run the examples below from the repository root.
-
-## Installation
-
-Choose one of the following methods to make `geohueo` available from any directory. None requires `sudo`.
-
-### Using Cargo (recommended)
-
-Install [geohueo from crates.io](https://crates.io/crates/geohueo) with Rust 1.85+:
 
 ```sh
 cargo install geohueo --locked
 ```
 
-To update an installed copy to the latest published version, run the same command again.
-
-To install from a source checkout instead, run from the repository root:
+From a source checkout:
 
 ```sh
 cargo install --path . --locked
 ```
 
-Both commands build the release binary and install it for your user; no separate build is needed.
+For development, `cargo run -- 8.8.8.8` also works from the checkout.
 
-The default destination is `~/.cargo/bin` (or `$CARGO_HOME/bin` if `CARGO_HOME` is set).
-If that directory is not already on your `PATH`, run:
+The binary is installed to `~/.cargo/bin`. Add it to your `PATH` if needed:
 
 ```sh
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 ```
 
-### Installing the built binary manually (Linux/macOS)
-
-After building, copy the binary to your user's local executable directory:
+## Usage
 
 ```sh
-mkdir -p "$HOME/.local/bin"
-install -m 755 target/release/geohueo "$HOME/.local/bin/geohueo"
-export PATH="$HOME/.local/bin:$PATH"
+geohueo 8.8.8.8
+geohueo example.com
+geohueo                  # this machine's public IP
+geohueo 8.8.8.8 1.1.1.1 # several targets
+geohueo -4 example.com   # IPv4 only
+geohueo -6 example.com   # IPv6 only
+geohueo --timeout 5 example.com
 ```
 
-To keep a `PATH` change across terminal sessions, add the relevant `export` line to your shell's startup file, such as
-`~/.bashrc` or `~/.zshrc`.
-
-### Verify the installation
+### geoiplookup.io (default)
 
 ```sh
-geohueo --version
-geohueo --help
+geohueo 1.1.1.1
 ```
 
-After installation, you can use `geohueo` instead of `./target/release/geohueo` in all examples below.
+prints:
 
-## Usage examples
+```text
+  Provider:        geoiplookup.io
+  Profile:         geoiplookup
+  IP:              1.1.1.1
+  Country:         Australia (AU)
+  Continent:       Oceania (OC)
+  Region:          New South Wales
+  City:            Sydney
+  Coordinates:     -33.8688, 151.2090
+  Timezone:        Australia/Sydney
+  ISP:             Cloudflare, Inc.
+  ASN:             AS13335 - Cloudflare, Inc.
+  Connection type: Corporate
+  Currency:        Australian Dollar (AUD)
+  Language:        English (en)
+```
 
-### Your public IP
-
-With no address, the API looks up the caller's public IP as seen by the service.
+JSON output:
 
 ```sh
-./target/release/geohueo
+geohueo --json 1.1.1.1
 ```
 
-### An IPv4 or IPv6 address
+prints:
 
-Look up an IPv4 address:
+```json
+{
+  "ip": "1.1.1.1",
+  "isp": "Cloudflare, Inc.",
+  "org": "",
+  "hostname": "",
+  "latitude": -33.8688,
+  "longitude": 151.209,
+  "postal_code": "",
+  "city": "Sydney",
+  "country_code": "AU",
+  "country_name": "Australia",
+  "continent_code": "OC",
+  "continent_name": "Oceania",
+  "region": "New South Wales",
+  "district": "",
+  "timezone_name": "Australia/Sydney",
+  "connection_type": "Corporate",
+  "asn_number": 13335,
+  "asn_org": "Cloudflare, Inc.",
+  "asn": "AS13335 - Cloudflare, Inc.",
+  "currency_code": "AUD",
+  "currency_name": "Australian Dollar",
+  "language_code": "en",
+  "language_name": "English",
+  "success": true,
+  "premium": false
+}
+```
+
+### MaxMind GeoLite City
+
+With a configured GeoLite City profile:
 
 ```sh
-./target/release/geohueo 8.8.8.8
+geohueo --profile geolite 8.8.8.8
 ```
 
-Or an IPv6 address:
+prints:
+
+```text
+  Provider:        maxmind geolite city
+  Profile:         geolite
+  IP:              8.8.8.8
+  Country:         United States (US)
+  Continent:       North America (NA)
+  Coordinates:     37.7510, -97.8220 (±1000 km)
+  Timezone:        America/Chicago
+  ASN:             AS15169 - Google LLC
+```
+
+JSON output:
 
 ```sh
-./target/release/geohueo 2001:4860:4860::8888
+geohueo --profile geolite --json 8.8.8.8
 ```
 
-### A hostname
+prints:
 
-The hostname is resolved locally, then its first returned IP address is looked up.
+```json
+{
+  "schema_version": 1,
+  "profile": "geolite",
+  "provider": "maxmind geolite city",
+  "target": "8.8.8.8",
+  "success": true,
+  "data": {
+    "ip": "8.8.8.8",
+    "network": "8.8.8.0/24",
+    "country_code": "US",
+    "country_name": "United States",
+    "registered_country_code": "US",
+    "registered_country_name": "United States",
+    "continent_code": "NA",
+    "continent_name": "North America",
+    "region": null,
+    "subdivisions": [],
+    "city": null,
+    "district": null,
+    "postal_code": null,
+    "latitude": 37.751,
+    "longitude": -97.822,
+    "accuracy_radius_km": 1000,
+    "timezone_name": "America/Chicago",
+    "isp": null,
+    "org": null,
+    "asn_number": 15169,
+    "asn_org": "Google LLC",
+    "asn": null,
+    "connection_type": null,
+    "hostname": null,
+    "currency_code": null,
+    "currency_name": null,
+    "language_code": null,
+    "language_name": null
+  }
+}
+```
+
+The JSON examples are pretty-printed for readability; geohueo writes one compact JSON object per line.
+
+`--json` keeps the original format for geoiplookup and uses normalized JSON for MaxMind and REST/JSON profiles. To force
+normalized JSON for any profile (including geoiplookup):
 
 ```sh
-./target/release/geohueo example.com
+geohueo --output normalized-json 8.8.8.8
 ```
 
-### Multiple targets
+`--json` and `--output` cannot be combined.
 
-Mix addresses and hostnames in one command. A failed lookup does not stop the remaining targets.
+Normalized JSON Lines produce one result per target, including lookup failures. Failures contain an `error` object
+instead of `data`, with a stable `code`, a diagnostic `message`, and an optional `http_status`:
+
+```json
+{"schema_version":1,"profile":"geolite","provider":"maxmind geolite city","target":"8.8.8.8","success":false,"error":{"code":"authentication","message":"MaxMind HTTP 401: invalid MaxMind credentials","http_status":401}}
+```
+
+Lookup error codes are `dns`, `timeout`, `transport`, `http`, `authentication`, `permission_denied`, `quota_exceeded`,
+`rate_limited`, `decode`, `mapping`, `no_data`, `unsupported_capability`, and `api` (a REST/JSON success rule or error
+field reports failure). `provider` is the fallback for an unclassified third-party provider error. Use `code` for
+programmatic handling; message wording is not a stable contract. Configuration and missing-credential errors stop
+execution before lookups, write diagnostics to stderr, and return exit code 2 without emitting per-target JSON. The
+legacy geoiplookup.io `--json` format remains unchanged.
+
+For hostnames, `IP` is the resolved address and `Target` is the hostname.
+
+## Configuration
+
+The built-in profile works without a configuration file. To add another provider, create a configuration file:
+
+- Linux: `${XDG_CONFIG_HOME:-$HOME/.config}/geohueo/config.toml`
+- macOS: `${XDG_CONFIG_HOME:-$HOME/Library/Application Support}/geohueo/config.toml`
+- Windows: `%APPDATA%\geohueo\config.toml`
+
+### MaxMind
+
+A MaxMind account is required. GeoLite web services are free; GeoIP web services are paid. [Create a free MaxMind
+account](https://www.maxmind.com/en/geolite2/signup), then use your Account ID and a license key from that account.
+
+```toml
+schema_version = 1
+default_profile = "geolite"
+
+[profiles.geolite]
+adapter = "maxmind"
+service = "geolite" # geoip or geolite
+product = "city"    # country, city, or insights (geoip only)
+
+[profiles.geolite.auth]
+type = "basic"
+username_env = "MAXMIND_ACCOUNT_ID"
+password_env = "MAXMIND_LICENSE_KEY"
+```
+
+`username_env` and `password_env` are the **names** of environment variables, not the credentials themselves:
 
 ```sh
-./target/release/geohueo 8.8.8.8 1.1.1.1 example.com
+export MAXMIND_ACCOUNT_ID='your-account-id'
+export MAXMIND_LICENSE_KEY='your-license-key'
+
+geohueo --check-config
+geohueo --profile geolite 8.8.8.8
 ```
 
-### Choose IPv4 or IPv6 for a hostname
+`--check-config` validates the configuration and loads credentials for the selected profile without contacting the
+provider. Ready-to-edit examples: [GeoIP City](examples/profiles/maxmind-geoip.toml), [GeoLite
+City](examples/profiles/maxmind-geolite-city.toml), and [GeoLite Country](examples/profiles/maxmind-geolite.toml).
 
-Use `-4` (or `--ipv4`) to select the first IPv4 address:
+### Other JSON APIs
+
+Start from [rest-path.toml](examples/profiles/rest-path.toml), [rest-query.toml](examples/profiles/rest-query.toml), or
+[rest-basic.toml](examples/profiles/rest-basic.toml). Copy one into your config, then change `base_url`, the request
+path/query, the JSON field pointers, and the auth section. The examples cover Bearer, Basic, and API-key authentication.
 
 ```sh
-./target/release/geohueo -4 example.com
+geohueo --config ./config.toml --check-config
 ```
 
-Use `-6` (or `--ipv6`) to select the first IPv6 address:
+Use `--config PATH` or `GEOHUEO_CONFIG` to select a file, and `--profile NAME` or `GEOHUEO_PROFILE` to select a profile.
+CLI flags take precedence. `--list-profiles` shows all profiles.
 
-```sh
-./target/release/geohueo -6 example.com
-```
+Keep the config and any credential file private (`chmod 600`).
 
-These options cannot be combined. They affect hostname resolution only, not literal IP addresses or the API connection.
-If the hostname has no address of the requested family, the lookup fails.
-
-### Set the HTTP timeout
-
-Limit each API request to five seconds:
-
-```sh
-./target/release/geohueo --timeout 5 example.com
-```
-
-The default is 10 seconds. Only positive whole seconds are accepted; `--timeout=5` also works.
-This timeout does not cover local resolution of the input hostname.
-
-### JSON output for scripts
-
-Use `--json` (or `-j`) to print one JSON object per line (JSON Lines):
-
-```sh
-./target/release/geohueo --json 8.8.8.8
-```
-
-Save multiple results to a file:
-
-```sh
-./target/release/geohueo --json 8.8.8.8 1.1.1.1 > results.jsonl
-```
-
-Diagnostics go to stderr. Decoded API responses with `success: false` are still printed in JSON mode;
-DNS, network, HTTP, or response decoding failures do not produce a JSON object.
-
-### Help and version
-
-Show all options:
-
-```sh
-./target/release/geohueo --help
-```
-
-Show the binary's version:
-
-```sh
-./target/release/geohueo --version
-```
-
-## Notes and exit codes
-
-Geolocation is approximate, and looked-up IP addresses are sent to the external service.
-Private, loopback, and other special-use addresses may have no geolocation data.
+## Exit codes
 
 | Code | Meaning |
 | --- | --- |
-| `0` | All lookups succeeded. |
-| `1` | A lookup failed or no geolocation data was found. |
-| `2` | Invalid command-line arguments. |
+| 0 | Success |
+| 1 | Lookup failed or no geolocation data |
+| 2 | Invalid arguments or configuration, missing credentials, or unsupported target |
 
-## Development
+Geolocation is approximate. Private, loopback, and other special addresses may have no data. Looked-up addresses are
+sent to the selected external service.
 
-```sh
-cargo fmt --all -- --check
-cargo clippy --locked --all-targets -- -D warnings
-cargo test --locked --all-targets
-```
+## License
 
-Tests use local HTTP fixtures and do not query the public geolocation API.
+The code is MIT licensed. geoiplookup.io, MaxMind, and custom services have their own terms and may require an account
+or payment. This is an unofficial client, not affiliated with geoiplookup.io or MaxMind.
 
-Changes are listed in [CHANGELOG.md](CHANGELOG.md).
-
-## License and API terms
-
-The source code is distributed under the [MIT License](LICENSE), which permits commercial use of the code.
-
-The geoiplookup.io service has separate [usage terms](https://geoiplookup.io/api). Its free API is for personal
-and project use; commercial API use requires permission from the service provider. Contact
-[post@octosec.io](mailto:post@octosec.io) for commercial usage. The MIT license does not grant rights to use the
-external service or its data beyond the provider's terms. This is an unofficial client, not affiliated with
-geoiplookup.io.
+- [MIT License](LICENSE)
+- [geoiplookup.io API terms](https://geoiplookup.io/api)
+- [MaxMind terms](https://www.maxmind.com/en/site-license-overview)
+- [Changelog](CHANGELOG.md)

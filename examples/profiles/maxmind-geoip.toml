@@ -1,0 +1,14 @@
+schema_version = 1
+default_profile = "maxmind"
+timeout_seconds = 10
+
+[profiles.maxmind]
+adapter = "maxmind"
+service = "geoip"
+product = "city"
+locales = ["ru", "en"]
+
+[profiles.maxmind.auth]
+type = "basic"
+username_env = "MAXMIND_ACCOUNT_ID"
+password_env = "MAXMIND_LICENSE_KEY"

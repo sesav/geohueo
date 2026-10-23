@@ -1,0 +1,12 @@
+schema_version = 1
+default_profile = "geolite"
+
+[profiles.geolite]
+adapter = "maxmind"
+service = "geolite"
+product = "country"
+
+[profiles.geolite.auth]
+type = "basic"
+username_env = "MAXMIND_ACCOUNT_ID"
+password_env = "MAXMIND_LICENSE_KEY"
