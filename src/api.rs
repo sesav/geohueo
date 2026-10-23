@@ -1,6 +1,7 @@
 use std::net::IpAddr;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://json.geoiplookup.io";
@@ -57,14 +58,21 @@ impl Client {
     }
 
     /// Look up an IP address. `None` asks the API to look up the caller's address.
-    pub fn lookup(&self, ip: Option<IpAddr>) -> Result<IpInfo, ureq::Error> {
+    pub fn lookup(&self, ip: Option<IpAddr>) -> Result<IpInfo> {
         let url = match ip {
             Some(ip) => format!("{API_BASE}/{ip}"),
             None => format!("{API_BASE}/"),
         };
 
-        let mut response = self.agent.get(&url).call()?;
-        response.body_mut().read_json()
+        let mut response = self
+            .agent
+            .get(&url)
+            .call()
+            .with_context(|| format!("request to {url} failed"))?;
+        response
+            .body_mut()
+            .read_json()
+            .context("could not read geolocation response")
     }
 }
 
