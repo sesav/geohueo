@@ -9,7 +9,10 @@ fn help_succeeds_without_a_lookup() {
 
     assert!(output.status.success());
     assert!(output.stderr.is_empty());
-    assert!(String::from_utf8(output.stdout).unwrap().contains("Usage:"));
+    let help = String::from_utf8(output.stdout).unwrap();
+    for option in ["Usage:", "--ipv4", "--ipv6", "--timeout"] {
+        assert!(help.contains(option));
+    }
 }
 
 #[test]
@@ -44,10 +47,46 @@ fn unknown_option_returns_usage_error() {
 }
 
 #[test]
+fn invalid_timeout_returns_usage_error_without_a_lookup() {
+    for args in [
+        vec!["--timeout"],
+        vec!["--timeout", "0"],
+        vec!["--timeout=-1"],
+        vec!["--timeout=NaN"],
+        vec!["--timeout=18446744073709551615"],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_geolkp"))
+            .args(args)
+            .output()
+            .unwrap();
+
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8(output.stderr).unwrap().contains("--timeout"));
+    }
+}
+
+#[test]
+fn conflicting_address_families_return_usage_error_without_a_lookup() {
+    let output = Command::new(env!("CARGO_BIN_EXE_geolkp"))
+        .args(["-4", "-6"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2));
+    assert!(output.stdout.is_empty());
+    assert!(
+        String::from_utf8(output.stderr)
+            .unwrap()
+            .contains("cannot be used together")
+    );
+}
+
+#[test]
 fn resolution_failures_do_not_stop_remaining_targets() {
     // Malformed targets are rejected locally without DNS or API requests.
     let output = Command::new(env!("CARGO_BIN_EXE_geolkp"))
-        .args(["--json", "[invalid]", "[also-invalid]"])
+        .args(["--json", "-4", "--timeout=5", "[invalid]", "[also-invalid]"])
         .output()
         .unwrap();
 

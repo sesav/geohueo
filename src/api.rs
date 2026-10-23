@@ -4,7 +4,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 
 const API_BASE: &str = "https://json.geoiplookup.io";
-const TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Response returned by the geoiplookup.io API.
 ///
@@ -45,9 +45,9 @@ pub struct Client {
 }
 
 impl Client {
-    pub fn new() -> Self {
+    pub fn new(timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()
-            .timeout_global(Some(TIMEOUT))
+            .timeout_global(Some(timeout))
             .user_agent(concat!("geolkp/", env!("CARGO_PKG_VERSION")))
             .build();
 
@@ -70,13 +70,24 @@ impl Client {
 
 impl Default for Client {
     fn default() -> Self {
-        Self::new()
+        Self::new(DEFAULT_TIMEOUT)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configures_requested_http_timeout() {
+        let timeout = Duration::from_secs(5);
+        let client = Client::new(timeout);
+        assert_eq!(client.agent.config().timeouts().global, Some(timeout));
+        assert_eq!(
+            Client::default().agent.config().timeouts().global,
+            Some(DEFAULT_TIMEOUT)
+        );
+    }
 
     #[test]
     fn accepts_partial_response_and_unknown_fields() {

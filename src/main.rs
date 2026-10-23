@@ -59,7 +59,7 @@ fn execute(
 }
 
 fn run(args: Args, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Result<u8> {
-    let client = Client::new();
+    let client = Client::new(args.timeout);
     let mut output = Output::new(stdout, args.json);
     let mut failed = false;
 
@@ -69,7 +69,7 @@ fn run(args: Args, stdout: &mut impl Write, stderr: &mut impl Write) -> io::Resu
     }
 
     for input in &args.targets {
-        let target = match resolve(input) {
+        let target = match resolve(input, args.family) {
             Ok(target) => target,
             Err(message) => {
                 writeln!(stderr, "geolkp: {message}")?;

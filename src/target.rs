@@ -1,4 +1,24 @@
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressFamily {
+    Any,
+    Ipv4,
+    Ipv6,
+}
+
+impl AddressFamily {
+    fn select(self, addresses: impl IntoIterator<Item = SocketAddr>) -> Option<IpAddr> {
+        addresses
+            .into_iter()
+            .map(|address| address.ip())
+            .find(|ip| match self {
+                Self::Any => true,
+                Self::Ipv4 => ip.is_ipv4(),
+                Self::Ipv6 => ip.is_ipv6(),
+            })
+    }
+}
 
 pub enum Target {
     Address(IpAddr),
@@ -21,7 +41,8 @@ impl Target {
     }
 }
 
-pub fn resolve(input: &str) -> Result<Target, String> {
+pub fn resolve(input: &str, family: AddressFamily) -> Result<Target, String> {
+    // Family selection only applies to DNS results, not explicit IP addresses.
     if let Ok(ip) = input.parse::<IpAddr>() {
         return Ok(Target::Address(ip));
     }
@@ -38,16 +59,23 @@ pub fn resolve(input: &str) -> Result<Target, String> {
         ));
     }
 
-    let mut addresses = (input, 0)
+    let addresses = (input, 0)
         .to_socket_addrs()
         .map_err(|error| format!("cannot resolve '{input}': {error}"))?;
 
-    match addresses.next() {
-        Some(address) => Ok(Target::Hostname {
+    match family.select(addresses) {
+        Some(ip) => Ok(Target::Hostname {
             host: input.to_string(),
-            ip: address.ip(),
+            ip,
         }),
-        None => Err(format!("cannot resolve '{input}': no addresses found")),
+        None => {
+            let reason = match family {
+                AddressFamily::Any => "no addresses found",
+                AddressFamily::Ipv4 => "no IPv4 addresses found",
+                AddressFamily::Ipv6 => "no IPv6 addresses found",
+            };
+            Err(format!("cannot resolve '{input}': {reason}"))
+        }
     }
 }
 
@@ -106,11 +134,36 @@ mod tests {
     #[test]
     fn resolves_ip_literals_without_dns() {
         for input in ["8.8.8.8", "2001:4860:4860::8888"] {
-            let target = resolve(input).unwrap();
-            assert!(matches!(target, Target::Address(_)));
-            assert_eq!(target.ip(), input.parse::<IpAddr>().unwrap());
-            assert_eq!(target.label(), input);
+            for family in [AddressFamily::Any, AddressFamily::Ipv4, AddressFamily::Ipv6] {
+                let target = resolve(input, family).unwrap();
+                assert!(matches!(target, Target::Address(_)));
+                assert_eq!(target.ip(), input.parse::<IpAddr>().unwrap());
+                assert_eq!(target.label(), input);
+            }
         }
+    }
+
+    #[test]
+    fn selects_first_address_of_requested_family() {
+        let ipv6: SocketAddr = "[2001:db8::1]:0".parse().unwrap();
+        let ipv4: SocketAddr = "192.0.2.1:0".parse().unwrap();
+        let next_ipv4: SocketAddr = "192.0.2.2:0".parse().unwrap();
+        let addresses = [ipv6, ipv4, next_ipv4];
+
+        assert_eq!(AddressFamily::Any.select(addresses), Some(ipv6.ip()));
+        assert_eq!(AddressFamily::Ipv4.select(addresses), Some(ipv4.ip()));
+        assert_eq!(AddressFamily::Ipv6.select(addresses), Some(ipv6.ip()));
+        assert_eq!(AddressFamily::Any.select([ipv4, ipv6]), Some(ipv4.ip()));
+    }
+
+    #[test]
+    fn does_not_fall_back_to_another_family() {
+        let ipv6: SocketAddr = "[2001:db8::1]:0".parse().unwrap();
+        let ipv4: SocketAddr = "192.0.2.1:0".parse().unwrap();
+
+        assert_eq!(AddressFamily::Ipv4.select([ipv6]), None);
+        assert_eq!(AddressFamily::Ipv6.select([ipv4]), None);
+        assert_eq!(AddressFamily::Any.select([]), None);
     }
 
     #[test]
@@ -123,7 +176,7 @@ mod tests {
             "not a hostname",
             "example.com\0",
         ] {
-            assert!(resolve(input).is_err());
+            assert!(resolve(input, AddressFamily::Any).is_err());
         }
     }
 
