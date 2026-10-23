@@ -80,7 +80,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                     };
                     if parsed.family != AddressFamily::Any && parsed.family != family {
                         return Err(
-                            "options '--ipv4' and '--ipv6' cannot be used together".to_string(),
+                            "options '--ipv4' and '--ipv6' cannot be used together".to_string()
                         );
                     }
                     parsed.family = family;
@@ -201,7 +201,11 @@ mod tests {
     #[test]
     fn rejects_conflicting_address_families() {
         for flags in [["-4", "-6"], ["--ipv6", "--ipv4"], ["-4", "--ipv6"]] {
-            assert!(parse(&flags).unwrap_err().contains("cannot be used together"));
+            assert!(
+                parse(&flags)
+                    .unwrap_err()
+                    .contains("cannot be used together")
+            );
         }
     }
 
@@ -237,7 +241,11 @@ mod tests {
 
     #[test]
     fn rejects_missing_or_invalid_timeout() {
-        assert!(parse(&["--timeout"]).unwrap_err().contains("requires a value"));
+        assert!(
+            parse(&["--timeout"])
+                .unwrap_err()
+                .contains("requires a value")
+        );
         for value in [
             "",
             "0",

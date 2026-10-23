@@ -61,7 +61,11 @@ fn invalid_timeout_returns_usage_error_without_a_lookup() {
 
         assert_eq!(output.status.code(), Some(2));
         assert!(output.stdout.is_empty());
-        assert!(String::from_utf8(output.stderr).unwrap().contains("--timeout"));
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("--timeout")
+        );
     }
 }
 

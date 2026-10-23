@@ -1,7 +1,6 @@
 # geohueo
 
 A command-line tool for finding IPv4/IPv6 and hostname locations using [geoiplookup.io](https://geoiplookup.io/api).
-Just for personal, home, non-commercial, educational use. The outside service's rules apply here.
 
 Since there wasn't a clear, easy tool for domain or IP info, I just built a small utility for fun. Hoping it helps
 others as well.
@@ -18,16 +17,23 @@ The binary is `target/release/geohueo`. Run the examples below from the reposito
 
 ## Installation
 
-Choose one of the following methods to make `geohueo` available from any directory. Neither requires `sudo`.
+Choose one of the following methods to make `geohueo` available from any directory. None requires `sudo`.
 
 ### Using Cargo (recommended)
 
-Run from the repository root. Cargo builds the release binary and installs it for your user;
-no separate build is needed.
+Once the package is published to crates.io, install it with Rust 1.85+:
+
+```sh
+cargo install geohueo --locked
+```
+
+To install from a source checkout instead, run from the repository root:
 
 ```sh
 cargo install --path . --locked
 ```
+
+Both commands build the release binary and install it for your user; no separate build is needed.
 
 The default destination is `~/.cargo/bin` (or `$CARGO_HOME/bin` if `CARGO_HOME` is set).
 If that directory is not already on your `PATH`, run:
@@ -167,3 +173,25 @@ Private, loopback, and other special-use addresses may have no geolocation data.
 | `0` | All lookups succeeded. |
 | `1` | A lookup failed or no geolocation data was found. |
 | `2` | Invalid command-line arguments. |
+
+## Development
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+```
+
+Tests use local HTTP fixtures and do not query the public geolocation API.
+
+Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+
+## License and API terms
+
+The source code is distributed under the [MIT License](LICENSE), which permits commercial use of the code.
+
+The geoiplookup.io service has separate [usage terms](https://geoiplookup.io/api). Its free API is for personal
+and project use; commercial API use requires permission from the service provider. Contact
+[post@octosec.io](mailto:post@octosec.io) for commercial usage. The MIT license does not grant rights to use the
+external service or its data beyond the provider's terms. This is an unofficial client, not affiliated with
+geoiplookup.io.
