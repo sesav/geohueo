@@ -231,6 +231,12 @@ mod tests {
             .with_legacy_json(serde_json::to_string(info).unwrap())
     }
 
+    fn jsonl_text(bytes: &[u8]) -> String {
+        std::str::from_utf8(bytes)
+            .expect("JSONL fixture must be UTF-8")
+            .replace("\r\n", "\n")
+    }
+
     #[test]
     fn renders_available_fields() {
         let info = GeoRecord {
@@ -398,7 +404,10 @@ mod tests {
         Output::new(&mut legacy, true)
             .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
             .unwrap();
-        assert_eq!(legacy, include_bytes!("../examples/jsonl/legacy.jsonl"));
+        assert_eq!(
+            jsonl_text(&legacy),
+            jsonl_text(include_bytes!("../examples/jsonl/legacy.jsonl"))
+        );
 
         let record = GeoRecord {
             ip: Some("8.8.8.8".into()),
@@ -414,8 +423,8 @@ mod tests {
             .emit(&LookupResult::new(record, true), "8.8.8.8", "8.8.8.8")
             .unwrap();
         assert_eq!(
-            normalized,
-            include_bytes!("../examples/jsonl/normalized-success.jsonl")
+            jsonl_text(&normalized),
+            jsonl_text(include_bytes!("../examples/jsonl/normalized-success.jsonl"))
         );
 
         let mut failure = Vec::new();
@@ -429,8 +438,8 @@ mod tests {
             .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
             .unwrap();
         assert_eq!(
-            failure,
-            include_bytes!("../examples/jsonl/normalized-error.jsonl")
+            jsonl_text(&failure),
+            jsonl_text(include_bytes!("../examples/jsonl/normalized-error.jsonl"))
         );
     }
 
