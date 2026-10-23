@@ -51,6 +51,49 @@ impl HttpTransport {
             .with_context(|| format!("request to {url} failed"))
     }
 
+    /// No redirects, status errors or URLs in diagnostics: configured query parameters may
+    /// contain credentials, and a third-party error can include the entire request URL.
+    pub fn configured(timeout: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .user_agent(concat!("geohueo/", env!("CARGO_PKG_VERSION")))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+
+    pub fn get_configured(
+        &self,
+        url: &url::Url,
+        header: Option<(&str, &str)>,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        let request = self.agent.get(url.as_str());
+        let request = if let Some((name, value)) = header {
+            request.header(name, value)
+        } else {
+            request
+        };
+        request
+            .call()
+            .map_err(|_| anyhow::anyhow!("REST/JSON request failed (connection or timeout)"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn configured_for_test(timeout: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .proxy(None)
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn authorized_for_test(timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()

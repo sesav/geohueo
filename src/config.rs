@@ -9,11 +9,12 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use crate::cli::timeout_from_seconds;
+use crate::provider::configurable::{RestProfile, RestSettings};
 use crate::provider::geoiplookup::DEFAULT_TIMEOUT;
 
 const BUILTIN_PROFILE: &str = "geoiplookup";
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     schema_version: u32,
@@ -34,7 +35,7 @@ impl Default for FileConfig {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Deserialize)]
 #[serde(tag = "adapter", deny_unknown_fields)]
 enum ProfileConfig {
     #[serde(rename = "geoiplookup")]
@@ -47,6 +48,8 @@ enum ProfileConfig {
         locales: Option<Vec<String>>,
         auth: AuthConfig,
     },
+    #[serde(rename = "rest-json")]
+    RestJson(Box<RestProfile>),
 }
 
 #[derive(Debug, Deserialize)]
@@ -85,6 +88,7 @@ pub(crate) struct MaxMindSettings {
 pub(crate) enum Adapter {
     Geoiplookup,
     Maxmind(MaxMindSettings),
+    RestJson(Box<RestSettings>),
 }
 
 impl std::fmt::Debug for Adapter {
@@ -92,6 +96,7 @@ impl std::fmt::Debug for Adapter {
         f.write_str(match self {
             Self::Geoiplookup => "Geoiplookup",
             Self::Maxmind(_) => "Maxmind(<redacted>)",
+            Self::RestJson(_) => "RestJson(<redacted>)",
         })
     }
 }
@@ -198,6 +203,16 @@ impl Config {
                     validate_env_name(username_env)?;
                     validate_env_name(password_env)?;
                 }
+                ProfileConfig::RestJson(rest) => {
+                    if name == BUILTIN_PROFILE {
+                        bail!("the built-in profile '{BUILTIN_PROFILE}' cannot be replaced");
+                    }
+                    if let Some(seconds) = rest.timeout_seconds {
+                        validate_timeout(seconds, &format!("profiles.{name}.timeout_seconds"))?;
+                    }
+                    rest.validate()
+                        .with_context(|| format!("profiles.{name}"))?;
+                }
             }
         }
         if let Some(name) = &file.default_profile {
@@ -252,6 +267,7 @@ impl Config {
             | Some(ProfileConfig::Maxmind {
                 timeout_seconds, ..
             }) => *timeout_seconds,
+            Some(ProfileConfig::RestJson(rest)) => rest.timeout_seconds,
             None if name == BUILTIN_PROFILE => None,
             None => bail!("profile '{name}' is not configured"),
         };
@@ -286,6 +302,7 @@ impl Config {
                     license_key: read_secret(password_env)?,
                 })
             }
+            Some(ProfileConfig::RestJson(rest)) => Adapter::RestJson(Box::new(rest.resolve()?)),
             _ => Adapter::Geoiplookup,
         };
 
@@ -311,7 +328,7 @@ fn validate_timeout(seconds: u64, field: &str) -> Result<()> {
     Ok(())
 }
 
-fn validate_env_name(name: &str) -> Result<()> {
+pub(crate) fn validate_env_name(name: &str) -> Result<()> {
     let mut chars = name.chars();
     if !chars
         .next()
@@ -323,7 +340,7 @@ fn validate_env_name(name: &str) -> Result<()> {
     Ok(())
 }
 
-fn read_secret(name: &str) -> Result<String> {
+pub(crate) fn read_secret(name: &str) -> Result<String> {
     let value = env::var_os(name)
         .ok_or_else(|| anyhow!("credential environment variable {name} is not set"))?
         .into_string()
@@ -445,6 +462,26 @@ mod tests {
             Adapter::Geoiplookup
         ));
         assert!(config.select(Some("mm"), None, None).is_err());
+    }
+
+    #[test]
+    fn rest_json_profile_validates_all_settings_but_only_reads_selected_secret() {
+        let sample = "schema_version = 1\n[profiles.custom]\nadapter = 'rest-json'\nbase_url = 'https://geo.example.invalid'\nsupports_ipv4 = true\nsupports_ipv6 = false\n[profiles.custom.auth]\ntype = 'bearer'\ntoken_env = 'GEOHUEO_UNUSED_REST_TOKEN'\n[profiles.custom.request]\nmethod = 'GET'\npath = '/lookup/{ip}'\n[profiles.custom.response]\nrequired_fields = ['ip']\n[profiles.custom.response.fields]\nip = '/data/address'";
+        let config = parse(sample).unwrap();
+        assert_eq!(config.profile_names(), ["custom", "geoiplookup"]);
+        assert!(matches!(
+            config.select(None, None, None).unwrap().adapter,
+            Adapter::Geoiplookup
+        ));
+        assert!(config.select(Some("custom"), None, None).is_err());
+        for bad in [
+            sample.replace("https://geo.example.invalid", "http://geo.example.invalid"),
+            sample.replace("/lookup/{ip}", "/lookup/{ip}?token=secret"),
+            format!("{sample}\nunknown = 1"),
+            sample.replace("supports_ipv4 = true", "supports_ipv4 = false"),
+        ] {
+            assert!(parse(&bad).is_err(), "accepted {bad}");
+        }
     }
 
     #[test]

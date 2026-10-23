@@ -69,10 +69,10 @@ After installation, you can use `geohueo` instead of `./target/release/geohueo` 
 
 ## Configuration (source builds)
 
-The current source version supports named profiles for **geoiplookup.io**, **MaxMind GeoIP** and **MaxMind GeoLite**
-web services. Other API adapters are planned. Without a configuration file, the CLI behaves as before.
+The current source version supports named profiles for **geoiplookup.io**, **MaxMind GeoIP/GeoLite** web services, and
+configurable GET/JSON APIs. Without a configuration file, the CLI behaves as before.
 
-Create `$XDG_CONFIG_HOME/geohueo/config.toml` (or `~/.config/geohueo/config.toml` on Linux if `XDG_CONFIG_HOME` is unset):
+Create `$XDG_CONFIG_HOME/geohueo/config.toml`:
 
 ```toml
 schema_version = 1
@@ -92,10 +92,10 @@ geohueo --config ./config.toml --check-config
 ```
 
 `GEOHUEO_CONFIG` selects the file and `GEOHUEO_PROFILE` selects a profile. Explicit `--config` and `--profile` take
-precedence. Request timeout priority is `--timeout`, profile `timeout_seconds`, global `timeout_seconds`, then 10 seconds.
-An absent default config file is allowed; a missing file explicitly selected with `--config` or `GEOHUEO_CONFIG` is an
-error (exit code 2). `--check-config` and `--list-profiles` do not make API requests. Help and version work even when
-the config is invalid. The built-in `geoiplookup` profile is always available.
+precedence. Request timeout priority is `--timeout`, profile `timeout_seconds`, global `timeout_seconds`, then 10
+seconds. An absent default config file is allowed; a missing file explicitly selected with `--config` or
+`GEOHUEO_CONFIG` is an error (exit code 2). `--check-config` and `--list-profiles` do not make API requests. Help and
+version work even when the config is invalid. The built-in `geoiplookup` profile is always available.
 
 ### MaxMind GeoIP / GeoLite
 
@@ -128,6 +128,74 @@ MaxMind GeoIP uses `geoip.maxmind.com`; GeoLite uses `geolite.info`. All request
 authentication is not forwarded on redirects. Product access and usage limits depend on your MaxMind account.
 `--check-config` does not contact the service. A successful config check does not verify credentials or product access
 with MaxMind.
+
+### Other GET/JSON APIs
+
+For a service with an IP in a URL path and a Bearer token (this example uses a fictional API):
+
+```toml
+[profiles.custom]
+adapter = "rest-json"
+base_url = "https://geo.example.invalid"  # HTTPS origin only, no path, query, or credentials
+supports_ipv4 = true
+supports_ipv6 = true
+
+[profiles.custom.auth]
+type = "bearer"
+token_env = "CUSTOM_GEO_TOKEN"
+
+[profiles.custom.request]
+method = "GET"
+path = "/v1/lookup/{ip}"
+self_path = "/v1/lookup/me"           # optional; omit to disable lookup without an IP
+
+[profiles.custom.response]
+success_pointer = "/ok"
+success_equals = true
+error_message_pointer = "/error/message"
+required_fields = ["ip"]
+
+[profiles.custom.response.fields]
+ip = "/data/ip"
+country_code = "/data/country/code"
+city = "/data/city"
+latitude = "/data/location/lat"
+longitude = "/data/location/lon"
+```
+
+For services with an IP and an API key in query parameters, use `path = "/v1/lookup"` and:
+
+```toml
+[profiles.custom.auth]
+type = "api_key"
+location = "query"                     # or "header" with name = "X-API-Key"
+name = "key"
+value_env = "CUSTOM_GEO_API_KEY"
+
+[profiles.custom.request.query]
+ip = "{ip}"
+format = "detailed"
+
+[profiles.custom.request.self_query]
+format = "detailed"                   # required with self_path if query contains {ip}
+```
+
+Choose one whole `{ip}` path segment **or** one whole query value for the address; the CLI resolves hostnames to IPs
+before substitution. Query values (including keys) are URL-encoded separately. For authorization, `type = "none"` (or no
+auth section) and `type = "basic"` with `username_env`/`password_env` are also supported. Credentials must be
+set in the environment; they are never stored directly in the profile. Redirects are refused, including for
+unauthenticated profiles, and the API must use HTTPS. `--check-config` checks the selected profile's credentials without
+making requests.
+
+Response mappings use [JSON Pointer](https://datatracker.ietf.org/doc/html/rfc6901). Map scalar fields from the
+normalized record (such as `ip`, `network`, `country_name`, `region`, `asn_number`, `latitude`, `longitude`, `isp`);
+unmapped or JSON `null` optional fields are absent. Incorrect types are errors, not implicit conversions. For ASN
+strings such as `"AS15169"`, use `[profiles.custom.response.transforms]` with `asn_number = "asn_to_number"`.
+`success_pointer` and `success_equals` must be set together (boolean, integer or string); alternatively specify
+`required_fields` containing mapped field names. A successful HTTP 200 alone is never enough. Optional `expected_status`
+can select another 2xx status. `error_message_pointer` identifies an API error even with HTTP 200; its untrusted value
+is **not echoed** (it may contain credentials). Non-JSON and oversized responses fail safely. Only GET/JSON and the
+built-in transform are supported; more complex protocols need their own adapter.
 
 ## Usage examples
 
@@ -214,10 +282,11 @@ Save multiple results to a file:
 Diagnostics go to stderr. Decoded API responses with `success: false` are still printed in JSON mode;
 DNS, network, HTTP, or response decoding failures do not produce a JSON object.
 
-For MaxMind, `--json` emits **normalized, versioned JSON Lines** instead of the legacy geoiplookup.io fields. Each
-target produces a line, including errors, with `schema_version`, `profile`, `target`, `success`, and either `data` or
-`error`. MaxMind Country responses may lack city, ISP and coordinates. Where provided, `accuracy_radius_km` represents
-the approximate uncertainty of coordinates. The original geoiplookup.io `--json` format is unchanged.
+For MaxMind and REST/JSON profiles, `--json` emits **normalized, versioned JSON Lines** instead of the legacy
+geoiplookup.io fields. Each target produces a line, including errors, with `schema_version`, `profile`, `target`,
+`success`, and either `data` or `error`. MaxMind Country responses may lack city, ISP and coordinates. Where provided,
+`accuracy_radius_km` represents the approximate uncertainty of coordinates. The original geoiplookup.io `--json` format
+is unchanged.
 
 ### Help and version
 
@@ -242,7 +311,7 @@ Private, loopback, and other special-use addresses may have no geolocation data.
 | --- | --- |
 | `0` | All lookups succeeded. |
 | `1` | A lookup failed or no geolocation data was found. |
-| `2` | Invalid command-line arguments or configuration. |
+| `2` | Invalid command-line arguments or configuration, missing credentials, or unsupported lookup target for a profile. |
 
 ## Development
 
@@ -260,8 +329,8 @@ Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 The source code is distributed under the [MIT License](LICENSE), which permits commercial use of the code.
 
-The geoiplookup.io service has separate [usage terms](https://geoiplookup.io/api). Its free API is for personal
-and project use; commercial API use requires permission from the service provider. Contact
+The geoiplookup.io service has separate [usage terms](https://geoiplookup.io/api). Its free API is for personal and
+project use; commercial API use requires permission from the service provider. Contact
 [post@octosec.io](mailto:post@octosec.io) for commercial usage. The MIT license does not grant rights to use the
 external service or its data beyond the provider's terms. This is an unofficial client, not affiliated with
 geoiplookup.io.

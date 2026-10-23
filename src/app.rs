@@ -10,6 +10,7 @@ use crate::config::{Adapter, Config, SelectedProfile};
 use crate::model::LookupTarget;
 use crate::output::Output;
 use crate::provider::GeoProvider;
+use crate::provider::configurable;
 use crate::provider::geoiplookup::Client;
 use crate::provider::maxmind;
 use crate::target::{no_data_message, resolve};
@@ -101,6 +102,10 @@ fn run(
             let client = maxmind::Client::new(settings, profile.timeout);
             run_with_provider(args, &client, Some(&profile.name), stdout, stderr)
         }
+        Adapter::RestJson(settings) => {
+            let client = configurable::Client::new(*settings, profile.timeout);
+            run_with_provider(args, &client, Some(&profile.name), stdout, stderr)
+        }
     }
 }
 
@@ -116,10 +121,10 @@ fn run_with_provider(
         None => Output::new(stdout, args.json),
     };
     let mut failed = false;
+    let mut unsupported = false;
 
     if args.targets.is_empty() {
-        let success = lookup(provider, None, "current IP", &mut output, stderr)?;
-        return Ok(u8::from(!success));
+        return Ok(lookup(provider, None, "current IP", &mut output, stderr)?.exit_code());
     }
 
     for input in &args.targets {
@@ -133,18 +138,36 @@ fn run_with_provider(
             }
         };
 
-        if !lookup(
+        match lookup(
             provider,
             Some(target.ip()),
             &target.label(),
             &mut output,
             stderr,
         )? {
-            failed = true;
+            LookupStatus::Success => {}
+            LookupStatus::Failure => failed = true,
+            LookupStatus::Unsupported => unsupported = true,
         }
     }
 
-    Ok(u8::from(failed))
+    Ok(if unsupported { 2 } else { u8::from(failed) })
+}
+
+enum LookupStatus {
+    Success,
+    Failure,
+    Unsupported,
+}
+
+impl LookupStatus {
+    fn exit_code(self) -> u8 {
+        match self {
+            Self::Success => 0,
+            Self::Failure => 1,
+            Self::Unsupported => 2,
+        }
+    }
 }
 
 fn lookup(
@@ -153,14 +176,20 @@ fn lookup(
     label: &str,
     output: &mut Output<impl Write>,
     stderr: &mut impl Write,
-) -> Result<bool> {
+) -> Result<LookupStatus> {
     let target = ip.map_or(LookupTarget::SelfIp, LookupTarget::Ip);
+    if !provider.capabilities().supports(target) {
+        let message = "target is not supported by this profile";
+        output.emit_error(label, message)?;
+        writeln!(stderr, "geohueo: {label}: {message}")?;
+        return Ok(LookupStatus::Unsupported);
+    }
     let info = match provider.lookup(target) {
         Ok(info) => info,
         Err(error) => {
             output.emit_error(label, &format!("{error:#}"))?;
             writeln!(stderr, "geohueo: {label}: lookup failed: {error:#}")?;
-            return Ok(false);
+            return Ok(LookupStatus::Failure);
         }
     };
 
@@ -183,7 +212,11 @@ fn lookup(
         )?;
     }
 
-    Ok(info.success)
+    Ok(if info.success {
+        LookupStatus::Success
+    } else {
+        LookupStatus::Failure
+    })
 }
 
 #[cfg(test)]

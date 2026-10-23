@@ -364,6 +364,86 @@ fn maxmind_credentials_are_required_only_for_selected_profile_and_not_printed() 
 }
 
 #[test]
+fn rest_json_cli_checks_config_credentials_and_capabilities_without_network() {
+    let file = TempConfig::new(
+        "schema_version = 1\ndefault_profile = 'custom'\n\
+         [profiles.custom]\nadapter = 'rest-json'\nbase_url = 'https://geo.example.invalid'\nsupports_ipv4 = true\nsupports_ipv6 = false\n\
+         [profiles.custom.auth]\ntype = 'api_key'\nlocation = 'query'\nname = 'token'\nvalue_env = 'GEOHUEO_TEST_REST_KEY'\n\
+         [profiles.custom.request]\nmethod = 'GET'\npath = '/lookup/{ip}'\n\
+         [profiles.custom.response]\nrequired_fields = ['ip']\n\
+         [profiles.custom.response.fields]\nip = '/ip'\n",
+    );
+    let args = ["--config", file.0.to_str().unwrap(), "--check-config"];
+    let missing = isolated_command()
+        .args(args)
+        .env_remove("GEOHUEO_TEST_REST_KEY")
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(
+        String::from_utf8(missing.stderr)
+            .unwrap()
+            .contains("GEOHUEO_TEST_REST_KEY")
+    );
+    let selected = isolated_command()
+        .args(args)
+        .env("GEOHUEO_TEST_REST_KEY", "test/secret?value")
+        .output()
+        .unwrap();
+    assert!(selected.status.success());
+    assert_eq!(
+        String::from_utf8(selected.stdout).unwrap(),
+        "configuration is valid (profile: custom)\n"
+    );
+    assert!(selected.stderr.is_empty());
+    let unselected = isolated_command()
+        .args([
+            "--config",
+            file.0.to_str().unwrap(),
+            "--profile",
+            "geoiplookup",
+            "--check-config",
+        ])
+        .env_remove("GEOHUEO_TEST_REST_KEY")
+        .output()
+        .unwrap();
+    assert!(unselected.status.success());
+
+    // Unsupported targets are rejected before the HTTPS lookup, even with a
+    // non-resolving test origin and a secret-bearing query authentication mode.
+    let unsupported = isolated_command()
+        .args([
+            "--config",
+            file.0.to_str().unwrap(),
+            "--json",
+            "2001:db8::1",
+        ])
+        .env("GEOHUEO_TEST_REST_KEY", "test/secret?value")
+        .output()
+        .unwrap();
+    assert_eq!(unsupported.status.code(), Some(2));
+    let line: serde_json::Value = serde_json::from_slice(&unsupported.stdout).unwrap();
+    assert_eq!(line["profile"], "custom");
+    assert_eq!(line["success"], false);
+    assert!(line["error"].as_str().unwrap().contains("not supported"));
+    assert!(
+        !String::from_utf8(unsupported.stderr)
+            .unwrap()
+            .contains("test/secret?value")
+    );
+
+    let no_self = isolated_command()
+        .args(["--config", file.0.to_str().unwrap(), "--json"])
+        .env("GEOHUEO_TEST_REST_KEY", "test/secret?value")
+        .output()
+        .unwrap();
+    assert_eq!(no_self.status.code(), Some(2));
+    let line: serde_json::Value = serde_json::from_slice(&no_self.stdout).unwrap();
+    assert_eq!(line["target"], "current IP");
+    assert_eq!(line["success"], false);
+}
+
+#[test]
 fn default_profile_is_available_without_a_config_file() {
     let output = isolated_command().arg("--list-profiles").output().unwrap();
     assert!(output.status.success());

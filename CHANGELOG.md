@@ -7,6 +7,7 @@
 - Library-level geolocation provider interface and a normalized geolocation model.
 - TOML profiles for the existing geoiplookup.io provider, with CLI/environment selection and configuration validation.
 - MaxMind GeoIP/GeoLite web-service profiles with Basic Auth, localized geolocation data, and normalized JSON Lines.
+- Configurable REST/JSON profiles with URL templates, JSON Pointer field mapping, capability checks, and Bearer/Basic/API-key authentication.
 
 ## [0.1.0]
 

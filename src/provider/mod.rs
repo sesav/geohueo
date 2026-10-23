@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use crate::model::{LookupResult, LookupTarget};
 
+pub mod configurable;
 pub mod geoiplookup;
 pub mod maxmind;
 
