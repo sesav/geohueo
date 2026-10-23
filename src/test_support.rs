@@ -8,7 +8,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use crate::api::Client;
+use crate::provider::geoiplookup::Client;
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
 // Windows may take over a second to report a refused connection. Keep the short

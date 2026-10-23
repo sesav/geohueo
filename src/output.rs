@@ -1,7 +1,7 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
-use crate::api::IpInfo;
+use crate::model::{GeoRecord, LookupResult};
 
 pub struct Output<W> {
     writer: W,
@@ -18,17 +18,19 @@ impl<W: Write> Output<W> {
         }
     }
 
-    /// Failed lookups are still emitted in JSON mode, but not in text mode.
-    pub fn emit(&mut self, info: &IpInfo, label: &str) -> io::Result<()> {
+    /// Decoded legacy `success: false` responses are emitted in JSON mode only.
+    pub fn emit(&mut self, result: &LookupResult, label: &str) -> io::Result<()> {
         if self.json {
-            serde_json::to_writer(&mut self.writer, info)?;
-            writeln!(self.writer)?;
-        } else if info.success {
+            let json = result.legacy_json().ok_or_else(|| {
+                io::Error::new(io::ErrorKind::Unsupported, "provider has no JSON output")
+            })?;
+            writeln!(self.writer, "{json}")?;
+        } else if result.success {
             if !self.first {
                 writeln!(self.writer)?;
             }
 
-            write!(self.writer, "{}", render(info, label))?;
+            write!(self.writer, "{}", render(&result.record, label))?;
             self.first = false;
         }
 
@@ -36,7 +38,7 @@ impl<W: Write> Output<W> {
     }
 }
 
-fn render(info: &IpInfo, label: &str) -> String {
+fn render(info: &GeoRecord, label: &str) -> String {
     let mut out = String::new();
     out.push_str(label);
     out.push('\n');
@@ -44,17 +46,17 @@ fn render(info: &IpInfo, label: &str) -> String {
     push_field(
         &mut out,
         "Country",
-        &with_code(&info.country_name, &info.country_code),
+        &with_code(field(&info.country_name), field(&info.country_code)),
     );
     push_field(
         &mut out,
         "Continent",
-        &with_code(&info.continent_name, &info.continent_code),
+        &with_code(field(&info.continent_name), field(&info.continent_code)),
     );
-    push_field(&mut out, "Region", &info.region);
-    push_field(&mut out, "City", &info.city);
-    push_field(&mut out, "District", &info.district);
-    push_field(&mut out, "Postal code", &info.postal_code);
+    push_field(&mut out, "Region", field(&info.region));
+    push_field(&mut out, "City", field(&info.city));
+    push_field(&mut out, "District", field(&info.district));
+    push_field(&mut out, "Postal code", field(&info.postal_code));
     if let (Some(latitude), Some(longitude)) = (info.latitude, info.longitude) {
         push_field(
             &mut out,
@@ -62,24 +64,28 @@ fn render(info: &IpInfo, label: &str) -> String {
             &format!("{latitude:.4}, {longitude:.4}"),
         );
     }
-    push_field(&mut out, "Timezone", &info.timezone_name);
-    push_field(&mut out, "ISP", &info.isp);
-    push_field(&mut out, "Organization", &info.org);
+    push_field(&mut out, "Timezone", field(&info.timezone_name));
+    push_field(&mut out, "ISP", field(&info.isp));
+    push_field(&mut out, "Organization", field(&info.org));
     push_field(&mut out, "ASN", &asn_label(info));
-    push_field(&mut out, "Connection type", &info.connection_type);
-    push_field(&mut out, "Hostname", &info.hostname);
+    push_field(&mut out, "Connection type", field(&info.connection_type));
+    push_field(&mut out, "Hostname", field(&info.hostname));
     push_field(
         &mut out,
         "Currency",
-        &with_code(&info.currency_name, &info.currency_code),
+        &with_code(field(&info.currency_name), field(&info.currency_code)),
     );
     push_field(
         &mut out,
         "Language",
-        &with_code(&info.language_name, &info.language_code),
+        &with_code(field(&info.language_name), field(&info.language_code)),
     );
 
     out
+}
+
+fn field(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or("")
 }
 
 fn push_field(out: &mut String, label: &str, value: &str) {
@@ -101,13 +107,14 @@ fn with_code(name: &str, code: &str) -> String {
     }
 }
 
-fn asn_label(info: &IpInfo) -> String {
-    if !info.asn.trim().is_empty() {
-        return info.asn.trim().to_string();
+fn asn_label(info: &GeoRecord) -> String {
+    let asn = field(&info.asn).trim();
+    if !asn.is_empty() {
+        return asn.to_string();
     }
 
-    let org = info.asn_org.trim();
-    match (info.asn_number, org.is_empty()) {
+    let org = field(&info.asn_org).trim();
+    match (info.asn_number.unwrap_or(0), org.is_empty()) {
         (0, true) => String::new(),
         (0, false) => org.to_string(),
         (number, true) => format!("AS{number}"),
@@ -118,18 +125,23 @@ fn asn_label(info: &IpInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::geoiplookup::IpInfo;
+
+    fn legacy_result(info: &IpInfo) -> LookupResult {
+        LookupResult::new(GeoRecord::from(info), info.success)
+            .with_legacy_json(serde_json::to_string(info).unwrap())
+    }
 
     #[test]
     fn renders_available_fields() {
-        let info = IpInfo {
-            ip: "8.8.8.8".to_string(),
-            country_name: "United States".to_string(),
-            country_code: "US".to_string(),
-            city: "Mountain View".to_string(),
+        let info = GeoRecord {
+            ip: Some("8.8.8.8".to_string()),
+            country_name: Some("United States".to_string()),
+            country_code: Some("US".to_string()),
+            city: Some("Mountain View".to_string()),
             latitude: Some(37.422),
             longitude: Some(-122.085),
-            success: true,
-            ..IpInfo::default()
+            ..GeoRecord::default()
         };
 
         let output = render(&info, "8.8.8.8");
@@ -144,7 +156,7 @@ mod tests {
 
     #[test]
     fn omits_missing_or_incomplete_coordinates() {
-        let mut info = IpInfo::default();
+        let mut info = GeoRecord::default();
         assert!(!render(&info, "test").contains("Coordinates:"));
 
         info.latitude = Some(0.0);
@@ -156,13 +168,13 @@ mod tests {
 
     #[test]
     fn formats_asn_fallback_and_codes() {
-        let mut info = IpInfo {
-            asn_number: 15169,
-            asn_org: " Google LLC ".to_string(),
-            ..IpInfo::default()
+        let mut info = GeoRecord {
+            asn_number: Some(15169),
+            asn_org: Some(" Google LLC ".to_string()),
+            ..GeoRecord::default()
         };
         assert_eq!(asn_label(&info), "AS15169 - Google LLC");
-        info.asn = " AS15169 ".to_string();
+        info.asn = Some(" AS15169 ".to_string());
         assert_eq!(asn_label(&info), "AS15169");
         assert_eq!(with_code(" US ", " "), "US");
         assert_eq!(with_code("", " US "), "US");
@@ -175,10 +187,10 @@ mod tests {
         let mut output = Output::new(&mut bytes, false);
         let mut info = IpInfo::default();
 
-        output.emit(&info, "failed").unwrap();
+        output.emit(&legacy_result(&info), "failed").unwrap();
         info.success = true;
-        output.emit(&info, "first").unwrap();
-        output.emit(&info, "second").unwrap();
+        output.emit(&legacy_result(&info), "first").unwrap();
+        output.emit(&legacy_result(&info), "second").unwrap();
 
         assert_eq!(String::from_utf8(bytes).unwrap(), "first\n\nsecond\n");
     }
@@ -189,10 +201,10 @@ mod tests {
         let mut output = Output::new(&mut bytes, true);
         let mut info = IpInfo::default();
 
-        output.emit(&info, "failed").unwrap();
+        output.emit(&legacy_result(&info), "failed").unwrap();
         info.success = true;
         info.city = "a\nb".to_string();
-        output.emit(&info, "successful").unwrap();
+        output.emit(&legacy_result(&info), "successful").unwrap();
 
         let text = String::from_utf8(bytes).unwrap();
         let lines: Vec<serde_json::Value> = text
@@ -203,6 +215,26 @@ mod tests {
         assert_eq!(lines[0]["success"], false);
         assert_eq!(lines[1]["success"], true);
         assert_eq!(lines[1]["city"], "a\nb");
+    }
+
+    #[test]
+    fn legacy_json_output_matches_original_dto_serialization() {
+        let info = IpInfo {
+            ip: "8.8.8.8".to_string(),
+            latitude: Some(0.0),
+            success: true,
+            ..IpInfo::default()
+        };
+        let mut bytes = Vec::new();
+
+        Output::new(&mut bytes, true)
+            .emit(&legacy_result(&info), "8.8.8.8")
+            .unwrap();
+
+        assert_eq!(
+            String::from_utf8(bytes).unwrap(),
+            format!("{}\n", serde_json::to_string(&info).unwrap())
+        );
     }
 
     #[test]
@@ -225,7 +257,7 @@ mod tests {
         };
         for json in [false, true] {
             let error = Output::new(BrokenWriter, json)
-                .emit(&info, "test")
+                .emit(&legacy_result(&info), "test")
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         }

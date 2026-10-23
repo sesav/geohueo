@@ -1,7 +1,7 @@
 use std::ffi::OsString;
 use std::time::{Duration, Instant};
 
-use crate::api::DEFAULT_TIMEOUT;
+use crate::provider::geoiplookup::DEFAULT_TIMEOUT;
 use crate::target::AddressFamily;
 
 pub const HELP: &str = concat!(
