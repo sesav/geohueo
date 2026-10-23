@@ -1,3 +1,4 @@
+use std::env;
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::net::IpAddr;
@@ -5,10 +6,11 @@ use std::net::IpAddr;
 use anyhow::{Context, Result};
 
 use crate::cli::{self, Args, Command};
+use crate::config::{Adapter, Config, SelectedProfile};
 use crate::model::LookupTarget;
 use crate::output::Output;
-use crate::provider::geoiplookup::Client;
 use crate::provider::GeoProvider;
+use crate::provider::geoiplookup::Client;
 use crate::target::{no_data_message, resolve};
 
 pub fn is_broken_pipe(error: &anyhow::Error) -> bool {
@@ -31,23 +33,70 @@ pub fn execute(
         }
     };
 
-    match command {
+    enum Action {
+        Run,
+        CheckConfig,
+        ListProfiles,
+    }
+
+    let (args, action) = match command {
         Command::Help => {
             write!(stdout, "{}", cli::HELP).context("could not write help to stdout")?;
-            Ok(0)
+            return Ok(0);
         }
         Command::Version => {
             writeln!(stdout, "geohueo {}", env!("CARGO_PKG_VERSION"))
                 .context("could not write version to stdout")?;
-            Ok(0)
+            return Ok(0);
         }
-        Command::Run(args) => run(args, stdout, stderr),
+        Command::Run(args) => (args, Action::Run),
+        Command::CheckConfig(args) => (args, Action::CheckConfig),
+        Command::ListProfiles(args) => (args, Action::ListProfiles),
+    };
+
+    let config = match Config::load(args.config.as_deref(), env::var_os("GEOHUEO_CONFIG")) {
+        Ok(config) => config,
+        Err(error) => {
+            writeln!(stderr, "geohueo: {error:#}")?;
+            return Ok(2);
+        }
+    };
+    if matches!(action, Action::ListProfiles) {
+        for name in config.profile_names() {
+            writeln!(stdout, "{name}")?;
+        }
+        return Ok(0);
     }
+    let profile = match config.select(
+        args.profile.as_deref(),
+        env::var_os("GEOHUEO_PROFILE"),
+        args.timeout,
+    ) {
+        Ok(profile) => profile,
+        Err(error) => {
+            writeln!(stderr, "geohueo: {error:#}")?;
+            return Ok(2);
+        }
+    };
+    if matches!(action, Action::CheckConfig) {
+        writeln!(stdout, "configuration is valid (profile: {})", profile.name)?;
+        return Ok(0);
+    }
+    run(args, profile, stdout, stderr)
 }
 
-fn run(args: Args, stdout: &mut impl Write, stderr: &mut impl Write) -> Result<u8> {
-    let client = Client::new(args.timeout);
-    run_with_provider(args, &client, stdout, stderr)
+fn run(
+    args: Args,
+    profile: SelectedProfile,
+    stdout: &mut impl Write,
+    stderr: &mut impl Write,
+) -> Result<u8> {
+    match profile.adapter {
+        Adapter::Geoiplookup => {
+            let client = Client::new(profile.timeout);
+            run_with_provider(args, &client, stdout, stderr)
+        }
+    }
 }
 
 fn run_with_provider(
@@ -117,7 +166,9 @@ fn lookup(
         writeln!(
             stderr,
             "geohueo: {label}: {}",
-            no_data_message(ip.or_else(|| info.record.ip.as_deref().and_then(|ip| ip.parse().ok())))
+            no_data_message(
+                ip.or_else(|| info.record.ip.as_deref().and_then(|ip| ip.parse().ok()))
+            )
         )?;
     }
 
@@ -178,7 +229,11 @@ mod tests {
 
         assert_eq!(code, 0);
         assert!(stderr.is_empty());
-        assert!(String::from_utf8(stdout).unwrap().contains("Country:         US"));
+        assert!(
+            String::from_utf8(stdout)
+                .unwrap()
+                .contains("Country:         US")
+        );
         assert_eq!(
             *provider.targets.borrow(),
             [

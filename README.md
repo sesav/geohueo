@@ -66,6 +66,36 @@ geohueo --help
 
 After installation, you can use `geohueo` instead of `./target/release/geohueo` in all examples below.
 
+## Configuration (source builds)
+
+The current source version supports named profiles for **geoiplookup.io**. MaxMind and other API adapters are planned but
+not yet available. Without a configuration file, the CLI behaves as before.
+
+Create `$XDG_CONFIG_HOME/geohueo/config.toml` (or `~/.config/geohueo/config.toml` on Linux if `XDG_CONFIG_HOME` is unset):
+
+```toml
+schema_version = 1
+default_profile = "personal"
+timeout_seconds = 10
+
+[profiles.personal]
+adapter = "geoiplookup"
+timeout_seconds = 5
+```
+
+```sh
+geohueo --profile personal 8.8.8.8
+geohueo --check-config
+geohueo --list-profiles
+geohueo --config ./config.toml --check-config
+```
+
+`GEOHUEO_CONFIG` selects the file and `GEOHUEO_PROFILE` selects a profile. Explicit `--config` and `--profile` take
+precedence. Request timeout priority is `--timeout`, profile `timeout_seconds`, global `timeout_seconds`, then 10 seconds.
+An absent default config file is allowed; a missing file explicitly selected with `--config` or `GEOHUEO_CONFIG` is an
+error (exit code 2). `--check-config` and `--list-profiles` do not make API requests. Help and version work even when
+the config is invalid. The built-in `geoiplookup` profile is always available.
+
 ## Usage examples
 
 ### Your public IP
@@ -174,7 +204,7 @@ Private, loopback, and other special-use addresses may have no geolocation data.
 | --- | --- |
 | `0` | All lookups succeeded. |
 | `1` | A lookup failed or no geolocation data was found. |
-| `2` | Invalid command-line arguments. |
+| `2` | Invalid command-line arguments or configuration. |
 
 ## Development
 
