@@ -127,10 +127,14 @@ mod tests {
                 .to_string()
                 .starts_with("request to http://127.0.0.1:")
         );
-        assert!(matches!(
-            error.downcast_ref::<ureq::Error>(),
-            Some(ureq::Error::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused
-        ));
+        let cause = error.downcast_ref::<ureq::Error>();
+        assert!(
+            matches!(
+                cause,
+                Some(ureq::Error::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionRefused
+            ),
+            "expected ConnectionRefused, got {cause:?}; full error: {error:#}"
+        );
     }
 
     #[test]

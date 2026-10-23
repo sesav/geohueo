@@ -11,6 +11,9 @@ use std::time::Duration;
 use crate::api::Client;
 
 const CLIENT_TIMEOUT: Duration = Duration::from_secs(1);
+// Windows may take over a second to report a refused connection. Keep the short
+// timeout above for stalled-response tests, but give connection refusal time.
+const CONNECTION_REFUSED_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub enum Response {
@@ -130,7 +133,7 @@ pub fn unavailable_client() -> Client {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let client = Client::for_test(
         format!("http://{}", listener.local_addr().unwrap()),
-        CLIENT_TIMEOUT,
+        CONNECTION_REFUSED_TIMEOUT,
     );
     drop(listener);
     client
