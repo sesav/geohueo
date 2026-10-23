@@ -96,7 +96,8 @@ fn run(
     match profile.adapter {
         Adapter::Geoiplookup => {
             let client = Client::new(profile.timeout);
-            run_with_provider(args, &client, None, stdout, stderr)
+            let name = args.normalized_json.then_some(profile.name.as_str());
+            run_with_provider(args, &client, name, stdout, stderr)
         }
         Adapter::Maxmind(settings) => {
             let client = maxmind::Client::new(settings, profile.timeout);
@@ -116,9 +117,10 @@ fn run_with_provider(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<u8> {
-    let mut output = match profile {
-        Some(profile) => Output::for_profile(stdout, args.json, profile),
-        None => Output::new(stdout, args.json),
+    let mut output = match (args.normalized_json, profile) {
+        (true, name) => Output::for_profile(stdout, true, name.unwrap_or("geoiplookup")),
+        (false, Some(name)) => Output::for_profile(stdout, args.json, name),
+        (false, None) => Output::new(stdout, args.json),
     };
     let mut failed = false;
     let mut unsupported = false;

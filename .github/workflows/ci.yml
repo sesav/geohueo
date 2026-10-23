@@ -45,5 +45,9 @@ jobs:
         run: cargo +stable fmt --all -- --check
       - name: Run Clippy
         run: cargo +stable clippy --locked --all-targets -- -D warnings
+      - name: Validate shipped profiles and JSONL contracts
+        run: |
+          cargo +stable test --locked --test profile_examples
+          cargo +stable test --locked --lib output::tests::released_jsonl_contracts_match_shipped_examples
       - name: Verify publication package without uploading
         run: cargo +stable publish --dry-run --locked

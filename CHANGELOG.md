@@ -2,12 +2,16 @@
 
 ## [Unreleased]
 
+## [0.2.0]
+
 ### Added
 
 - Library-level geolocation provider interface and a normalized geolocation model.
 - TOML profiles for the existing geoiplookup.io provider, with CLI/environment selection and configuration validation.
 - MaxMind GeoIP/GeoLite web-service profiles with Basic Auth, localized geolocation data, and normalized JSON Lines.
 - Configurable REST/JSON profiles with URL templates, JSON Pointer field mapping, capability checks, and Bearer/Basic/API-key authentication.
+- Explicit `--output normalized-json` for every profile; the existing geoiplookup.io `--json` format remains unchanged.
+- Validated example profiles and versioned JSONL contracts, covered by automated tests.
 
 ## [0.1.0]
 
@@ -22,5 +26,6 @@ Initial release.
 - Human-readable output and JSON Lines output with `--json`.
 - Help, version information, and documented exit codes.
 
-[Unreleased]: https://github.com/sesav/geohueo/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/sesav/geohueo/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/sesav/geohueo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sesav/geohueo/releases/tag/v0.1.0

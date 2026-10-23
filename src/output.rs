@@ -28,13 +28,15 @@ impl<W: Write> Output<W> {
         output
     }
 
-    /// Decoded legacy `success: false` responses are emitted in JSON mode only.
+    /// The built-in legacy mode keeps its original response (including `success: false`).
     pub fn emit(&mut self, result: &LookupResult, label: &str, target: &str) -> io::Result<()> {
         if self.json {
-            if let Some(json) = result.legacy_json() {
+            if let Some(json) = result.legacy_json().filter(|_| self.profile.is_none()) {
                 writeln!(self.writer, "{json}")?;
+            } else if result.success {
+                self.write_normalized(target, true, Some(&result.record), None)?;
             } else {
-                self.write_normalized(target, result.success, Some(&result.record), None)?;
+                self.write_normalized(target, false, None, Some("no geolocation data"))?;
             }
         } else if result.success {
             if !self.first {
@@ -305,6 +307,67 @@ mod tests {
     }
 
     #[test]
+    fn released_jsonl_contracts_match_shipped_examples() {
+        let info = IpInfo {
+            ip: "8.8.8.8".into(),
+            country_code: "US".into(),
+            success: true,
+            ..IpInfo::default()
+        };
+        let mut legacy = Vec::new();
+        Output::new(&mut legacy, true)
+            .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
+            .unwrap();
+        assert_eq!(legacy, include_bytes!("../examples/jsonl/legacy.jsonl"));
+
+        let record = GeoRecord {
+            ip: Some("8.8.8.8".into()),
+            country_code: Some("US".into()),
+            latitude: Some(0.0),
+            longitude: Some(-122.1),
+            ..GeoRecord::default()
+        };
+        let mut normalized = Vec::new();
+        Output::for_profile(&mut normalized, true, "maxmind")
+            .emit(&LookupResult::new(record, true), "8.8.8.8", "8.8.8.8")
+            .unwrap();
+        assert_eq!(
+            normalized,
+            include_bytes!("../examples/jsonl/normalized-success.jsonl")
+        );
+
+        let mut failure = Vec::new();
+        let info = IpInfo {
+            success: false,
+            ..info
+        };
+        Output::for_profile(&mut failure, true, "geoiplookup")
+            .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
+            .unwrap();
+        assert_eq!(
+            failure,
+            include_bytes!("../examples/jsonl/normalized-error.jsonl")
+        );
+    }
+
+    #[test]
+    fn normalized_errors_have_no_data_and_keep_escaped_input_per_line() {
+        let mut bytes = Vec::new();
+        let mut output = Output::for_profile(&mut bytes, true, "custom");
+        output.emit_error("bad\nname", "cannot resolve").unwrap();
+        let lines: Vec<serde_json::Value> = String::from_utf8(bytes)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["schema_version"], 1);
+        assert_eq!(lines[0]["target"], "bad\nname");
+        assert_eq!(lines[0]["error"], "cannot resolve");
+        assert!(lines[0].get("data").is_none());
+    }
+
+    #[test]
     fn propagates_broken_pipe_in_both_formats() {
         struct BrokenWriter;
 
@@ -328,5 +391,13 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         }
+        let error = Output::for_profile(BrokenWriter, true, "maxmind")
+            .emit(
+                &LookupResult::new(GeoRecord::default(), true),
+                "test",
+                "test",
+            )
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 }

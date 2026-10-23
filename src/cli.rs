@@ -24,7 +24,8 @@ pub const HELP: &str = concat!(
     "      --profile NAME Use the named provider profile\n",
     "      --check-config  Validate configuration without a lookup\n",
     "      --list-profiles List configured provider profiles\n",
-    "  -j, --json         Print one JSON object per line\n",
+    "  -j, --json         Print JSON Lines (legacy format for geoiplookup.io)\n",
+    "      --output normalized-json  Print versioned, normalized JSON Lines for any profile\n",
     "  -h, --help         Print help\n",
     "  -V, --version      Print version\n",
     "  --                 Stop parsing options\n",
@@ -35,6 +36,7 @@ pub const HELP: &str = concat!(
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub json: bool,
+    pub normalized_json: bool,
     pub family: AddressFamily,
     pub timeout: Option<Duration>,
     pub config: Option<PathBuf>,
@@ -46,6 +48,7 @@ impl Default for Args {
     fn default() -> Self {
         Self {
             json: false,
+            normalized_json: false,
             family: AddressFamily::Any,
             timeout: None,
             config: None,
@@ -81,7 +84,24 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                 "-h" | "--help" => return Ok(Command::Help),
                 "-V" | "--version" => return Ok(Command::Version),
                 "-j" | "--json" => {
+                    if parsed.normalized_json {
+                        return Err(
+                            "options '--json' and '--output' cannot be used together".to_string()
+                        );
+                    }
                     parsed.json = true;
+                    continue;
+                }
+                "--output" => {
+                    let value = args
+                        .next()
+                        .transpose()?
+                        .ok_or("option '--output' requires a format")?;
+                    set_output(&mut parsed, &value)?;
+                    continue;
+                }
+                value if value.starts_with("--output=") => {
+                    set_output(&mut parsed, &value["--output=".len()..])?;
                     continue;
                 }
                 "-4" | "--ipv4" | "-6" | "--ipv6" => {
@@ -161,7 +181,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
             if !parsed.targets.is_empty() {
                 return Err(format!("option '{option}' cannot be used with targets"));
             }
-            if parsed.json || parsed.family != AddressFamily::Any {
+            if parsed.json || parsed.normalized_json || parsed.family != AddressFamily::Any {
                 return Err(format!(
                     "option '{option}' cannot be used with output or DNS options"
                 ));
@@ -180,6 +200,19 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
             }
         }
     }
+}
+
+fn set_output(args: &mut Args, value: &str) -> Result<(), String> {
+    if value != "normalized-json" {
+        return Err(format!(
+            "invalid value for '--output': '{value}' (expected normalized-json)"
+        ));
+    }
+    if args.json {
+        return Err("options '--json' and '--output' cannot be used together".to_string());
+    }
+    args.normalized_json = true;
+    Ok(())
 }
 
 fn set_command(current: &mut Option<&'static str>, option: &'static str) -> Result<(), String> {
@@ -323,6 +356,7 @@ mod tests {
             parse(&["8.8.8.8", "--timeout", "1", "-6", "example.com", "--json"]).unwrap(),
             Command::Run(Args {
                 json: true,
+                normalized_json: false,
                 family: AddressFamily::Ipv6,
                 timeout: Some(Duration::from_secs(1)),
                 config: None,
@@ -330,6 +364,31 @@ mod tests {
                 targets: vec!["8.8.8.8".to_string(), "example.com".to_string()],
             })
         );
+    }
+
+    #[test]
+    fn normalized_json_output_is_explicit_and_conflicts_with_legacy_flag() {
+        for option in [
+            vec!["--output", "normalized-json"],
+            vec!["--output=normalized-json"],
+        ] {
+            assert_eq!(
+                parse(&option).unwrap(),
+                Command::Run(Args {
+                    normalized_json: true,
+                    ..Args::default()
+                })
+            );
+        }
+        for options in [
+            vec!["--output"],
+            vec!["--output=other"],
+            vec!["--json", "--output=normalized-json"],
+            vec!["--output=normalized-json", "-j"],
+            vec!["--check-config", "--output=normalized-json"],
+        ] {
+            assert!(parse(&options).is_err(), "accepted {options:?}");
+        }
     }
 
     #[test]

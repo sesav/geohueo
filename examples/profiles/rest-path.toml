@@ -1,0 +1,31 @@
+# Fictional service: replace the HTTPS origin and JSON Pointers for your API.
+schema_version = 1
+default_profile = "custom"
+
+[profiles.custom]
+adapter = "rest-json"
+base_url = "https://geo.example.invalid"
+supports_ipv4 = true
+supports_ipv6 = true
+
+[profiles.custom.auth]
+type = "bearer"
+token_env = "CUSTOM_GEO_TOKEN"
+
+[profiles.custom.request]
+method = "GET"
+path = "/v1/lookup/{ip}"
+self_path = "/v1/lookup/me"
+
+[profiles.custom.response]
+success_pointer = "/ok"
+success_equals = true
+error_message_pointer = "/error/message"
+required_fields = ["ip"]
+
+[profiles.custom.response.fields]
+ip = "/data/ip"
+country_code = "/data/country/code"
+city = "/data/city"
+latitude = "/data/location/lat"
+longitude = "/data/location/lon"

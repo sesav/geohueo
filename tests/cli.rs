@@ -140,6 +140,62 @@ fn resolution_failures_do_not_stop_remaining_targets() {
     );
 }
 
+#[test]
+fn explicit_normalized_json_has_one_error_per_target_without_changing_legacy_json() {
+    let normalized = isolated_command()
+        .args(["--output", "normalized-json", "[invalid]", "[also-invalid]"])
+        .output()
+        .unwrap();
+    assert_eq!(normalized.status.code(), Some(1));
+    let lines: Vec<serde_json::Value> = String::from_utf8(normalized.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0]["profile"], "geoiplookup");
+    assert_eq!(lines[0]["target"], "[invalid]");
+    assert_eq!(lines[0]["schema_version"], 1);
+    assert_eq!(lines[0]["success"], false);
+    assert!(
+        lines[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("cannot resolve")
+    );
+    assert!(lines[0].get("data").is_none());
+    assert_eq!(lines[1]["target"], "[also-invalid]");
+
+    let legacy = isolated_command()
+        .args(["--json", "[invalid]"])
+        .output()
+        .unwrap();
+    assert_eq!(legacy.status.code(), Some(1));
+    assert!(legacy.stdout.is_empty());
+    let conflicting = isolated_command()
+        .args(["--output=normalized-json", "--json", "[invalid]"])
+        .output()
+        .unwrap();
+    assert_eq!(conflicting.status.code(), Some(2));
+    assert!(conflicting.stdout.is_empty());
+
+    let alias = TempConfig::new(
+        "schema_version = 1\ndefault_profile = 'personal'\n[profiles.personal]\nadapter = 'geoiplookup'\n",
+    );
+    let renamed = isolated_command()
+        .args([
+            "--config",
+            alias.0.to_str().unwrap(),
+            "--output=normalized-json",
+            "[invalid]",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(renamed.status.code(), Some(1));
+    let line: serde_json::Value = serde_json::from_slice(&renamed.stdout).unwrap();
+    assert_eq!(line["profile"], "personal");
+}
+
 #[cfg(unix)]
 #[test]
 fn non_utf8_argument_returns_usage_error_not_a_panic() {

@@ -1,7 +1,7 @@
 # geohueo
 
-A command-line tool for finding IPv4/IPv6 and hostname locations using [geoiplookup.io](https://geoiplookup.io/api)
-or MaxMind GeoIP/GeoLite web services.
+A command-line tool for finding IPv4/IPv6 and hostname locations using [geoiplookup.io](https://geoiplookup.io/api),
+MaxMind GeoIP/GeoLite web services, or a configured GET/JSON API.
 
 Since there wasn't a clear, easy tool for domain or IP info, I just built a small utility for fun. Hoping it helps
 others as well.
@@ -67,10 +67,12 @@ geohueo --help
 
 After installation, you can use `geohueo` instead of `./target/release/geohueo` in all examples below.
 
-## Configuration (source builds)
+## Configuration (new provider support in source builds)
 
 The current source version supports named profiles for **geoiplookup.io**, **MaxMind GeoIP/GeoLite** web services, and
 configurable GET/JSON APIs. Without a configuration file, the CLI behaves as before.
+To use new features before the next crates.io release, run `cargo install --path . --locked` from this source checkout.
+`cargo install geohueo --locked` installs the latest version already published on crates.io, which may be older.
 
 Create `$XDG_CONFIG_HOME/geohueo/config.toml`:
 
@@ -99,15 +101,10 @@ version work even when the config is invalid. The built-in `geoiplookup` profile
 
 ### MaxMind GeoIP / GeoLite
 
-Add a MaxMind profile to the TOML file (and optionally select it with `default_profile = "maxmind"`):
+Use the complete, validated [GeoIP City](examples/profiles/maxmind-geoip.toml) or
+[GeoLite Country](examples/profiles/maxmind-geolite.toml) profile as a starting point. For example:
 
 ```toml
-[profiles.maxmind]
-adapter = "maxmind"
-service = "geoip"           # "geoip" or "geolite"
-product = "city"            # "country", "city", or "insights" (GeoIP only)
-locales = ["ru", "en"]
-
 [profiles.maxmind.auth]
 type = "basic"
 username_env = "MAXMIND_ACCOUNT_ID"
@@ -117,12 +114,18 @@ password_env = "MAXMIND_LICENSE_KEY"
 Provide your **MaxMind account ID** and **license key** through these environment variables using your secret manager;
 do not put them in the TOML file or on the command line. Only the selected profile's credentials are read.
 
+After copying the profile into your default config:
+
 ```sh
 geohueo --profile maxmind --check-config
 geohueo --profile maxmind 8.8.8.8
 geohueo --profile maxmind -6 example.com
 geohueo --profile maxmind               # looks up the caller via MaxMind's /me endpoint
 ```
+
+When using a standalone example rather than merging it into your default config, pass `--config`:
+`geohueo --config examples/profiles/maxmind-geoip.toml --check-config`.
+`service` can be `geoip` or `geolite`; `product` can be `country`, `city`, or `insights` (GeoIP only).
 
 MaxMind GeoIP uses `geoip.maxmind.com`; GeoLite uses `geolite.info`. All requests use HTTPS and HTTP Basic Auth;
 authentication is not forwarded on redirects. Product access and usage limits depend on your MaxMind account.
@@ -131,15 +134,12 @@ with MaxMind.
 
 ### Other GET/JSON APIs
 
-For a service with an IP in a URL path and a Bearer token (this example uses a fictional API):
+Start with a complete, validated [path/Bearer](examples/profiles/rest-path.toml) or
+[query/API-key](examples/profiles/rest-query.toml) profile. Both use fictional endpoints; replace the HTTPS origin,
+request path and response pointers with those of your provider before making requests. For example, the path profile
+contains:
 
 ```toml
-[profiles.custom]
-adapter = "rest-json"
-base_url = "https://geo.example.invalid"  # HTTPS origin only, no path, query, or credentials
-supports_ipv4 = true
-supports_ipv6 = true
-
 [profiles.custom.auth]
 type = "bearer"
 token_env = "CUSTOM_GEO_TOKEN"
@@ -149,36 +149,31 @@ method = "GET"
 path = "/v1/lookup/{ip}"
 self_path = "/v1/lookup/me"           # optional; omit to disable lookup without an IP
 
-[profiles.custom.response]
-success_pointer = "/ok"
-success_equals = true
-error_message_pointer = "/error/message"
-required_fields = ["ip"]
-
 [profiles.custom.response.fields]
 ip = "/data/ip"
 country_code = "/data/country/code"
-city = "/data/city"
-latitude = "/data/location/lat"
-longitude = "/data/location/lon"
 ```
 
-For services with an IP and an API key in query parameters, use `path = "/v1/lookup"` and:
+For an API with IP and key in query parameters, the query example instead uses:
 
 ```toml
-[profiles.custom.auth]
+[profiles.query-api.auth]
 type = "api_key"
 location = "query"                     # or "header" with name = "X-API-Key"
 name = "key"
 value_env = "CUSTOM_GEO_API_KEY"
 
-[profiles.custom.request.query]
+[profiles.query-api.request.query]
 ip = "{ip}"
 format = "detailed"
 
-[profiles.custom.request.self_query]
+[profiles.query-api.request.self_query]
 format = "detailed"                   # required with self_path if query contains {ip}
 ```
+
+Replace the corresponding sections in one profile rather than appending duplicate TOML tables. Run
+`geohueo --config examples/profiles/rest-path.toml --check-config` with `CUSTOM_GEO_TOKEN` set to validate the first
+example without contacting the fictional API.
 
 Choose one whole `{ip}` path segment **or** one whole query value for the address; the CLI resolves hostnames to IPs
 before substitution. Query values (including keys) are URL-encoded separately. For authorization, `type = "none"` (or no
@@ -201,7 +196,8 @@ built-in transform are supported; more complex protocols need their own adapter.
 
 ### Your public IP
 
-With no address, the API looks up the caller's public IP as seen by the service.
+With no address, the API looks up the caller's public IP as seen by the service (if the selected profile supports
+self-lookup).
 
 ```sh
 ./target/release/geohueo
@@ -279,14 +275,25 @@ Save multiple results to a file:
 ./target/release/geohueo --json 8.8.8.8 1.1.1.1 > results.jsonl
 ```
 
-Diagnostics go to stderr. Decoded API responses with `success: false` are still printed in JSON mode;
-DNS, network, HTTP, or response decoding failures do not produce a JSON object.
+Diagnostics go to stderr. In the original geoiplookup.io `--json` mode, decoded API responses with `success: false`
+are still printed; DNS, network, HTTP, or response decoding failures do not produce a JSON object.
 
 For MaxMind and REST/JSON profiles, `--json` emits **normalized, versioned JSON Lines** instead of the legacy
-geoiplookup.io fields. Each target produces a line, including errors, with `schema_version`, `profile`, `target`,
-`success`, and either `data` or `error`. MaxMind Country responses may lack city, ISP and coordinates. Where provided,
-`accuracy_radius_km` represents the approximate uncertainty of coordinates. The original geoiplookup.io `--json` format
-is unchanged.
+geoiplookup.io fields. To request the same format explicitly for *any* provider (including geoiplookup.io), use
+`--output normalized-json` instead of `--json`:
+
+```sh
+geohueo --output normalized-json 8.8.8.8
+```
+
+These two flags cannot be combined. Each normalized target produces one line with `schema_version: 1`, `profile`,
+`target` (the original input, or `current IP`), `success`, and **either** `data` on success **or** `error` on failure.
+Unmapped optional fields in `data` serialize as `null`; `subdivisions` is an empty array when absent. Sample lines are
+checked against the implementation: [legacy success](examples/jsonl/legacy.jsonl),
+[normalized success](examples/jsonl/normalized-success.jsonl),
+[normalized error](examples/jsonl/normalized-error.jsonl). MaxMind Country responses may lack city, ISP and coordinates.
+Where provided, `accuracy_radius_km` represents the approximate uncertainty of coordinates. The original geoiplookup.io
+`--json` format, including its omission of DNS/HTTP errors, is unchanged.
 
 ### Help and version
 
@@ -319,9 +326,14 @@ Private, loopback, and other special-use addresses may have no geolocation data.
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
+cargo publish --dry-run --locked   # validate the release archive; does not upload
 ```
 
-Tests use local HTTP fixtures and do not query the public geolocation API.
+Tests validate shipped profile examples and JSONL contracts using local HTTP fixtures; they never query live APIs.
+CI also checks Rust 1.85, formatting, Clippy and the publication package. Publishing or testing paid services against
+live endpoints requires your own credentials and permission from their operators. If you have a MaxMind account and
+an applicable product/quota, you can optionally smoke-test your configured profile with a public IP; the CI suite
+never does so. Preparing a crate does not publish it or create a Git tag.
 
 Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
@@ -337,3 +349,5 @@ geoiplookup.io.
 
 MaxMind services require a separate MaxMind account and are subject to [MaxMind's terms](https://www.maxmind.com/en/site-license-overview).
 This is an unofficial client; the MIT license does not grant access to MaxMind data.
+
+Custom services may impose additional terms, quotas, and charges; check their policies before use.
