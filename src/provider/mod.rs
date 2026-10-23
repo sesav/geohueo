@@ -5,6 +5,7 @@ use anyhow::Result;
 use crate::model::{LookupResult, LookupTarget};
 
 pub mod geoiplookup;
+pub mod maxmind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Capabilities {

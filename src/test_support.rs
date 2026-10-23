@@ -17,7 +17,18 @@ const CONNECTION_REFUSED_TIMEOUT: Duration = Duration::from_secs(5);
 const IO_TIMEOUT: Duration = Duration::from_secs(3);
 
 pub enum Response {
-    Http { status: u16, body: &'static str },
+    Http {
+        status: u16,
+        body: &'static str,
+    },
+    HttpWithType {
+        status: u16,
+        body: &'static str,
+        content_type: &'static str,
+    },
+    Redirect {
+        location: String,
+    },
     Disconnect,
     StallBeforeHeaders,
     StallDuringBody,
@@ -28,6 +39,7 @@ pub struct TestServer {
     stop: Arc<AtomicBool>,
     release: Sender<()>,
     requests: Receiver<String>,
+    headers: Receiver<Vec<String>>,
     worker: Option<JoinHandle<io::Result<()>>>,
 }
 
@@ -39,6 +51,7 @@ impl TestServer {
         let worker_stop = Arc::clone(&stop);
         let (release, released) = mpsc::channel();
         let (requests_tx, requests) = mpsc::channel();
+        let (headers_tx, headers) = mpsc::channel();
         let worker = thread::spawn(move || {
             for response in responses {
                 if worker_stop.load(Ordering::SeqCst) {
@@ -56,6 +69,7 @@ impl TestServer {
                     return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
                 }
                 let _ = requests_tx.send(request.trim_end().to_string());
+                let mut request_headers = Vec::new();
                 loop {
                     let mut line = String::new();
                     if reader.read_line(&mut line)? == 0 {
@@ -64,7 +78,9 @@ impl TestServer {
                     if line == "\r\n" {
                         break;
                     }
+                    request_headers.push(line.trim_end().to_string());
                 }
+                let _ = headers_tx.send(request_headers);
                 drop(reader);
 
                 match response {
@@ -73,6 +89,23 @@ impl TestServer {
                             stream,
                             "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                             body.len()
+                        )?;
+                    }
+                    Response::HttpWithType {
+                        status,
+                        body,
+                        content_type,
+                    } => {
+                        write!(
+                            stream,
+                            "HTTP/1.1 {status} Test\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        )?;
+                    }
+                    Response::Redirect { location } => {
+                        write!(
+                            stream,
+                            "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
                         )?;
                     }
                     Response::Disconnect => {}
@@ -95,6 +128,7 @@ impl TestServer {
             stop,
             release,
             requests,
+            headers,
             worker: Some(worker),
         }
     }
@@ -109,6 +143,10 @@ impl TestServer {
 
     pub fn requests(&self) -> Vec<String> {
         self.requests.try_iter().collect()
+    }
+
+    pub fn headers(&self) -> Vec<Vec<String>> {
+        self.headers.try_iter().collect()
     }
 }
 

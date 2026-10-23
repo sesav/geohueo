@@ -11,6 +11,7 @@ use crate::model::LookupTarget;
 use crate::output::Output;
 use crate::provider::GeoProvider;
 use crate::provider::geoiplookup::Client;
+use crate::provider::maxmind;
 use crate::target::{no_data_message, resolve};
 
 pub fn is_broken_pipe(error: &anyhow::Error) -> bool {
@@ -94,7 +95,11 @@ fn run(
     match profile.adapter {
         Adapter::Geoiplookup => {
             let client = Client::new(profile.timeout);
-            run_with_provider(args, &client, stdout, stderr)
+            run_with_provider(args, &client, None, stdout, stderr)
+        }
+        Adapter::Maxmind(settings) => {
+            let client = maxmind::Client::new(settings, profile.timeout);
+            run_with_provider(args, &client, Some(&profile.name), stdout, stderr)
         }
     }
 }
@@ -102,10 +107,14 @@ fn run(
 fn run_with_provider(
     args: Args,
     provider: &dyn GeoProvider,
+    profile: Option<&str>,
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<u8> {
-    let mut output = Output::new(stdout, args.json);
+    let mut output = match profile {
+        Some(profile) => Output::for_profile(stdout, args.json, profile),
+        None => Output::new(stdout, args.json),
+    };
     let mut failed = false;
 
     if args.targets.is_empty() {
@@ -117,6 +126,7 @@ fn run_with_provider(
         let target = match resolve(input, args.family) {
             Ok(target) => target,
             Err(message) => {
+                output.emit_error(input, &message)?;
                 writeln!(stderr, "geohueo: {message}")?;
                 failed = true;
                 continue;
@@ -148,24 +158,25 @@ fn lookup(
     let info = match provider.lookup(target) {
         Ok(info) => info,
         Err(error) => {
+            output.emit_error(label, &format!("{error:#}"))?;
             writeln!(stderr, "geohueo: {label}: lookup failed: {error:#}")?;
             return Ok(false);
         }
     };
 
-    let label = if ip.is_none() {
+    let display_label = if ip.is_none() {
         info.record.ip.as_deref().unwrap_or(label)
     } else {
         label
     };
     output
-        .emit(&info, label)
-        .with_context(|| format!("could not write result for {label} to stdout"))?;
+        .emit(&info, display_label, label)
+        .with_context(|| format!("could not write result for {display_label} to stdout"))?;
 
     if !info.success {
         writeln!(
             stderr,
-            "geohueo: {label}: {}",
+            "geohueo: {display_label}: {}",
             no_data_message(
                 ip.or_else(|| info.record.ip.as_deref().and_then(|ip| ip.parse().ok()))
             )
@@ -178,6 +189,7 @@ fn lookup(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::{MaxMindProduct, MaxMindService, MaxMindSettings};
     use crate::model::{GeoRecord, LookupResult};
     use crate::provider::Capabilities;
     use crate::test_support::{Response, TestServer, unavailable_client};
@@ -225,7 +237,7 @@ mod tests {
             ..Args::default()
         };
 
-        let code = run_with_provider(args, &provider, &mut stdout, &mut stderr).unwrap();
+        let code = run_with_provider(args, &provider, None, &mut stdout, &mut stderr).unwrap();
 
         assert_eq!(code, 0);
         assert!(stderr.is_empty());
@@ -252,7 +264,7 @@ mod tests {
         let mut stderr = Vec::new();
 
         assert_eq!(
-            run_with_provider(Args::default(), &provider, &mut stdout, &mut stderr).unwrap(),
+            run_with_provider(Args::default(), &provider, None, &mut stdout, &mut stderr).unwrap(),
             0
         );
         assert!(stderr.is_empty());
@@ -275,6 +287,7 @@ mod tests {
                     ..Args::default()
                 },
                 &server.client(),
+                None,
                 &mut stdout,
                 &mut stderr,
             )
@@ -302,6 +315,7 @@ mod tests {
                     ..Args::default()
                 },
                 &unavailable_client(),
+                None,
                 &mut stdout,
                 &mut stderr,
             )
@@ -336,6 +350,7 @@ mod tests {
                 ..Args::default()
             },
             &server.client(),
+            None,
             &mut stdout,
             &mut stderr,
         )
@@ -354,6 +369,136 @@ mod tests {
             server.requests(),
             ["GET /8.8.8.8 HTTP/1.1", "GET /1.1.1.1 HTTP/1.1"]
         );
+    }
+
+    #[test]
+    fn maxmind_json_lines_include_successes_dns_and_api_errors() {
+        let server = TestServer::new(vec![
+            Response::HttpWithType {
+                status: 404,
+                content_type: "application/vnd.maxmind.com-error+json",
+                body: r#"{"code":"IP_ADDRESS_NOT_FOUND","error":"not found"}"#,
+            },
+            Response::Http {
+                status: 200,
+                body: r#"{"traits":{"ip_address":"1.1.1.1","network":"1.1.1.0/24"},"country":{"iso_code":"AU"}}"#,
+            },
+        ]);
+        let client = maxmind::Client::for_test(
+            MaxMindSettings {
+                service: MaxMindService::Geoip,
+                product: MaxMindProduct::Country,
+                locales: vec!["en".to_string()],
+                account_id: "123456".to_string(),
+                license_key: "test-license".to_string(),
+            },
+            server.url(),
+        );
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with_provider(
+            Args {
+                json: true,
+                targets: vec![
+                    "[invalid]".to_string(),
+                    "8.8.8.8".to_string(),
+                    "1.1.1.1".to_string(),
+                ],
+                ..Args::default()
+            },
+            &client,
+            Some("maxmind"),
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+
+        assert_eq!(code, 1);
+        let lines: Vec<serde_json::Value> = String::from_utf8(stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0]["target"], "[invalid]");
+        assert_eq!(lines[0]["success"], false);
+        assert_eq!(lines[1]["target"], "8.8.8.8");
+        assert!(
+            lines[1]["error"]
+                .as_str()
+                .unwrap()
+                .contains("no geolocation")
+        );
+        assert_eq!(lines[2]["schema_version"], 1);
+        assert_eq!(lines[2]["profile"], "maxmind");
+        assert_eq!(lines[2]["data"]["country_code"], "AU");
+        assert_eq!(lines[2]["success"], true);
+        assert_eq!(
+            server.requests(),
+            [
+                "GET /geoip/v2.1/country/8.8.8.8 HTTP/1.1",
+                "GET /geoip/v2.1/country/1.1.1.1 HTTP/1.1"
+            ]
+        );
+        assert!(!String::from_utf8(stderr).unwrap().contains("test-license"));
+    }
+
+    #[test]
+    fn maxmind_self_lookup_uses_original_target_in_json_and_resolved_ip_in_text() {
+        let make_client = || {
+            let server = TestServer::new(vec![Response::Http {
+                status: 200,
+                body: r#"{"traits":{"ip_address":"8.8.8.8","network":"8.8.8.0/24"},"country":{"iso_code":"US"}}"#,
+            }]);
+            let client = maxmind::Client::for_test(
+                MaxMindSettings {
+                    service: MaxMindService::Geoip,
+                    product: MaxMindProduct::Country,
+                    locales: vec!["en".to_string()],
+                    account_id: "123456".to_string(),
+                    license_key: "test-license".to_string(),
+                },
+                server.url(),
+            );
+            (server, client)
+        };
+        let (server, client) = make_client();
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        assert_eq!(
+            run_with_provider(
+                Args {
+                    json: true,
+                    ..Args::default()
+                },
+                &client,
+                Some("mm"),
+                &mut stdout,
+                &mut stderr
+            )
+            .unwrap(),
+            0
+        );
+        let json: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(json["target"], "current IP");
+        assert_eq!(json["data"]["ip"], "8.8.8.8");
+        assert_eq!(server.requests(), ["GET /geoip/v2.1/country/me HTTP/1.1"]);
+        assert!(stderr.is_empty());
+
+        let (_server, client) = make_client();
+        stdout.clear();
+        assert_eq!(
+            run_with_provider(
+                Args::default(),
+                &client,
+                Some("mm"),
+                &mut stdout,
+                &mut stderr
+            )
+            .unwrap(),
+            0
+        );
+        assert!(String::from_utf8(stdout).unwrap().starts_with("8.8.8.8\n"));
     }
 
     struct FailingWriter(io::ErrorKind);

@@ -53,7 +53,13 @@ fn help_succeeds_without_a_lookup() {
     assert!(output.stderr.is_empty());
     let help = String::from_utf8(output.stdout).unwrap();
     assert!(help.starts_with(concat!("geohueo ", env!("CARGO_PKG_VERSION"), "\n")));
-    for option in ["Usage: geohueo", "--ipv4", "--ipv6", "--timeout"] {
+    for option in [
+        "Usage: geohueo",
+        "--ipv4",
+        "--ipv6",
+        "--timeout",
+        "--profile",
+    ] {
         assert!(help.contains(option));
     }
 }
@@ -261,7 +267,7 @@ fn config_errors_are_usage_errors_and_help_bypasses_config() {
 }
 
 #[test]
-fn rejects_unknown_adapter_without_network_access() {
+fn rejects_incomplete_maxmind_profile_without_network_access() {
     let file = TempConfig::new(
         "schema_version = 1\ndefault_profile = 'maxmind'\n\
          [profiles.maxmind]\nadapter = 'maxmind'\n",
@@ -277,6 +283,84 @@ fn rejects_unknown_adapter_without_network_access() {
             .unwrap()
             .contains("maxmind")
     );
+}
+
+#[test]
+fn maxmind_credentials_are_required_only_for_selected_profile_and_not_printed() {
+    let file = TempConfig::new(
+        "schema_version = 1\ndefault_profile = 'maxmind'\n\
+         [profiles.maxmind]\nadapter = 'maxmind'\nservice = 'geoip'\nproduct = 'city'\n\
+         [profiles.maxmind.auth]\ntype = 'basic'\nusername_env = 'GEOHUEO_TEST_MM_ACCOUNT'\npassword_env = 'GEOHUEO_TEST_MM_KEY'\n",
+    );
+    let args = ["--config", file.0.to_str().unwrap(), "--check-config"];
+    let missing = isolated_command()
+        .args(args)
+        .env_remove("GEOHUEO_TEST_MM_ACCOUNT")
+        .env_remove("GEOHUEO_TEST_MM_KEY")
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(2));
+    assert!(missing.stdout.is_empty());
+    assert!(
+        String::from_utf8(missing.stderr)
+            .unwrap()
+            .contains("GEOHUEO_TEST_MM_ACCOUNT")
+    );
+
+    let with_keys = isolated_command()
+        .args(args)
+        .env("GEOHUEO_TEST_MM_ACCOUNT", "123456")
+        .env("GEOHUEO_TEST_MM_KEY", "my-test-license")
+        .output()
+        .unwrap();
+    assert!(with_keys.status.success());
+    assert_eq!(
+        String::from_utf8(with_keys.stdout).unwrap(),
+        "configuration is valid (profile: maxmind)\n"
+    );
+    assert!(with_keys.stderr.is_empty());
+
+    let other_profile = isolated_command()
+        .args([
+            "--config",
+            file.0.to_str().unwrap(),
+            "--profile",
+            "geoiplookup",
+            "--check-config",
+        ])
+        .env_remove("GEOHUEO_TEST_MM_ACCOUNT")
+        .env_remove("GEOHUEO_TEST_MM_KEY")
+        .output()
+        .unwrap();
+    assert!(other_profile.status.success());
+
+    let run = isolated_command()
+        .args(["--config", file.0.to_str().unwrap(), "--json", "[invalid]"])
+        .env("GEOHUEO_TEST_MM_ACCOUNT", "123456")
+        .env("GEOHUEO_TEST_MM_KEY", "my-test-license")
+        .output()
+        .unwrap();
+    assert_eq!(run.status.code(), Some(1));
+    let result: serde_json::Value = serde_json::from_slice(&run.stdout).unwrap();
+    assert_eq!(result["profile"], "maxmind");
+    assert_eq!(result["target"], "[invalid]");
+    assert_eq!(result["success"], false);
+    assert!(
+        !String::from_utf8(run.stderr)
+            .unwrap()
+            .contains("my-test-license")
+    );
+
+    let bad_account = isolated_command()
+        .args(args)
+        .env("GEOHUEO_TEST_MM_ACCOUNT", "not-an-id")
+        .env("GEOHUEO_TEST_MM_KEY", "my-test-license")
+        .output()
+        .unwrap();
+    assert_eq!(bad_account.status.code(), Some(2));
+    let stderr = String::from_utf8(bad_account.stderr).unwrap();
+    assert!(!stderr.contains("not-an-id"));
+    assert!(!stderr.contains("my-test-license"));
 }
 
 #[test]

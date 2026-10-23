@@ -39,11 +39,61 @@ impl Default for FileConfig {
 enum ProfileConfig {
     #[serde(rename = "geoiplookup")]
     Geoiplookup { timeout_seconds: Option<u64> },
+    #[serde(rename = "maxmind")]
+    Maxmind {
+        timeout_seconds: Option<u64>,
+        service: MaxMindService,
+        product: MaxMindProduct,
+        locales: Option<Vec<String>>,
+        auth: AuthConfig,
+    },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Deserialize)]
+#[serde(tag = "type", deny_unknown_fields)]
+enum AuthConfig {
+    #[serde(rename = "basic")]
+    Basic {
+        username_env: String,
+        password_env: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum MaxMindService {
+    Geoip,
+    Geolite,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum MaxMindProduct {
+    Country,
+    City,
+    Insights,
+}
+
+pub(crate) struct MaxMindSettings {
+    pub service: MaxMindService,
+    pub product: MaxMindProduct,
+    pub locales: Vec<String>,
+    pub account_id: String,
+    pub license_key: String,
+}
+
 pub(crate) enum Adapter {
     Geoiplookup,
+    Maxmind(MaxMindSettings),
+}
+
+impl std::fmt::Debug for Adapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Geoiplookup => "Geoiplookup",
+            Self::Maxmind(_) => "Maxmind(<redacted>)",
+        })
+    }
 }
 
 #[derive(Debug)]
@@ -111,6 +161,43 @@ impl Config {
                         validate_timeout(*seconds, &format!("profiles.{name}.timeout_seconds"))?;
                     }
                 }
+                ProfileConfig::Maxmind {
+                    timeout_seconds,
+                    service,
+                    product,
+                    locales,
+                    auth,
+                } => {
+                    if name == BUILTIN_PROFILE {
+                        bail!("the built-in profile '{BUILTIN_PROFILE}' cannot be replaced");
+                    }
+                    if let Some(seconds) = timeout_seconds {
+                        validate_timeout(*seconds, &format!("profiles.{name}.timeout_seconds"))?;
+                    }
+                    if *service == MaxMindService::Geolite && *product == MaxMindProduct::Insights {
+                        bail!("profiles.{name}: GeoLite does not support Insights");
+                    }
+                    if let Some(locales) = locales {
+                        if locales.is_empty()
+                            || locales.iter().any(|locale| {
+                                !matches!(
+                                    locale.as_str(),
+                                    "de" | "en" | "es" | "fr" | "ja" | "pt-BR" | "ru" | "zh-CN"
+                                )
+                            })
+                        {
+                            bail!(
+                                "profiles.{name}.locales must contain supported MaxMind language codes"
+                            );
+                        }
+                    }
+                    let AuthConfig::Basic {
+                        username_env,
+                        password_env,
+                    } = auth;
+                    validate_env_name(username_env)?;
+                    validate_env_name(password_env)?;
+                }
             }
         }
         if let Some(name) = &file.default_profile {
@@ -159,8 +246,12 @@ impl Config {
             .unwrap_or(BUILTIN_PROFILE);
         validate_profile_name(name)?;
 
-        let profile_timeout = match self.file.profiles.get(name) {
-            Some(ProfileConfig::Geoiplookup { timeout_seconds }) => *timeout_seconds,
+        let profile = self.file.profiles.get(name);
+        let profile_timeout = match profile {
+            Some(ProfileConfig::Geoiplookup { timeout_seconds })
+            | Some(ProfileConfig::Maxmind {
+                timeout_seconds, ..
+            }) => *timeout_seconds,
             None if name == BUILTIN_PROFILE => None,
             None => bail!("profile '{name}' is not configured"),
         };
@@ -169,9 +260,38 @@ impl Config {
             .or_else(|| self.file.timeout_seconds.and_then(timeout_from_seconds))
             .unwrap_or(DEFAULT_TIMEOUT);
 
+        let adapter = match profile {
+            Some(ProfileConfig::Maxmind {
+                service,
+                product,
+                locales,
+                auth,
+                ..
+            }) => {
+                let AuthConfig::Basic {
+                    username_env,
+                    password_env,
+                } = auth;
+                let account_id = read_secret(username_env)?;
+                if !account_id.chars().all(|c| c.is_ascii_digit()) {
+                    bail!(
+                        "credential environment variable {username_env} must contain a numeric account ID"
+                    );
+                }
+                Adapter::Maxmind(MaxMindSettings {
+                    service: *service,
+                    product: *product,
+                    locales: locales.clone().unwrap_or_else(|| vec!["en".to_string()]),
+                    account_id,
+                    license_key: read_secret(password_env)?,
+                })
+            }
+            _ => Adapter::Geoiplookup,
+        };
+
         Ok(SelectedProfile {
             name: name.to_string(),
-            adapter: Adapter::Geoiplookup,
+            adapter,
             timeout,
         })
     }
@@ -189,6 +309,31 @@ fn validate_timeout(seconds: u64, field: &str) -> Result<()> {
         bail!("{field} must be a positive whole number of seconds within the supported range");
     }
     Ok(())
+}
+
+fn validate_env_name(name: &str) -> Result<()> {
+    let mut chars = name.chars();
+    if !chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        || !chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        bail!("invalid credential environment variable name {name:?}");
+    }
+    Ok(())
+}
+
+fn read_secret(name: &str) -> Result<String> {
+    let value = env::var_os(name)
+        .ok_or_else(|| anyhow!("credential environment variable {name} is not set"))?
+        .into_string()
+        .map_err(|_| anyhow!("credential environment variable {name} is not valid UTF-8"))?;
+    if value.is_empty() || value.chars().any(char::is_control) {
+        bail!(
+            "credential environment variable {name} must be non-empty without control characters"
+        );
+    }
+    Ok(value)
 }
 
 fn default_config_path() -> Option<PathBuf> {
@@ -235,7 +380,7 @@ mod tests {
         assert_eq!(config.profile_names(), ["geoiplookup"]);
         let selected = config.select(None, None, None).unwrap();
         assert_eq!(selected.name, "geoiplookup");
-        assert_eq!(selected.adapter, Adapter::Geoiplookup);
+        assert!(matches!(selected.adapter, Adapter::Geoiplookup));
         assert_eq!(selected.timeout, DEFAULT_TIMEOUT);
     }
 
@@ -279,9 +424,27 @@ mod tests {
             "schema_version = 1\n[profiles.test]\nadapter = 'unknown'",
             "schema_version = 1\n[profiles.test]\nadapter = 'geoiplookup'\ntimeout_seconds = 0",
             "schema_version = 1\n[profiles.test]\nadapter = 'geoiplookup'\nunknown = 1",
+            "schema_version = 1\n[profiles.maxmind]\nadapter = 'maxmind'\nservice = 'geolite'\nproduct = 'insights'\n[profiles.maxmind.auth]\ntype = 'basic'\nusername_env = 'MM_ACCOUNT'\npassword_env = 'MM_KEY'",
+            "schema_version = 1\n[profiles.maxmind]\nadapter = 'maxmind'\nservice = 'geoip'\nproduct = 'city'\nlocales = ['xx']\n[profiles.maxmind.auth]\ntype = 'basic'\nusername_env = 'MM_ACCOUNT'\npassword_env = 'MM_KEY'",
+            "schema_version = 1\n[profiles.maxmind]\nadapter = 'maxmind'\nservice = 'geoip'\nproduct = 'city'\n[profiles.maxmind.auth]\ntype = 'basic'\nusername_env = 'BAD=NAME'\npassword_env = 'MM_KEY'",
+            "schema_version = 1\n[profiles.geoiplookup]\nadapter = 'maxmind'\nservice = 'geoip'\nproduct = 'city'\n[profiles.geoiplookup.auth]\ntype = 'basic'\nusername_env = 'MM_ACCOUNT'\npassword_env = 'MM_KEY'",
         ] {
             assert!(parse(input).is_err(), "unexpectedly accepted {input}");
         }
+    }
+
+    #[test]
+    fn maxmind_profile_is_parsed_without_loading_unselected_secrets() {
+        let config = parse(
+            "schema_version = 1\n[profiles.mm]\nadapter = 'maxmind'\nservice = 'geoip'\nproduct = 'city'\nlocales = ['ru', 'en']\n[profiles.mm.auth]\ntype = 'basic'\nusername_env = 'MM_UNUSED_ACCOUNT'\npassword_env = 'MM_UNUSED_KEY'",
+        )
+        .unwrap();
+        assert_eq!(config.profile_names(), ["geoiplookup", "mm"]);
+        assert!(matches!(
+            config.select(None, None, None).unwrap().adapter,
+            Adapter::Geoiplookup
+        ));
+        assert!(config.select(Some("mm"), None, None).is_err());
     }
 
     #[test]

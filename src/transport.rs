@@ -26,6 +26,44 @@ impl HttpTransport {
             .with_context(|| format!("request to {url} failed"))
     }
 
+    /// Authenticated requests must not follow redirects or expose credentials to another host.
+    pub fn authorized(timeout: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .user_agent(concat!("geohueo/", env!("CARGO_PKG_VERSION")))
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+
+    pub fn get_authorized(
+        &self,
+        url: &str,
+        authorization: &str,
+    ) -> Result<ureq::http::Response<ureq::Body>> {
+        self.agent
+            .get(url)
+            .header("Authorization", authorization)
+            .call()
+            .with_context(|| format!("request to {url} failed"))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn authorized_for_test(timeout: Duration) -> Self {
+        let config = ureq::Agent::config_builder()
+            .timeout_global(Some(timeout))
+            .proxy(None)
+            .max_redirects(0)
+            .http_status_as_error(false)
+            .build();
+        Self {
+            agent: config.into(),
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn for_test(timeout: Duration) -> Self {
         let config = ureq::Agent::config_builder()

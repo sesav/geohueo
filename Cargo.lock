@@ -143,6 +143,7 @@ name = "geohueo"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "base64",
  "serde",
  "serde_json",
  "toml",

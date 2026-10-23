@@ -9,6 +9,12 @@ pub enum LookupTarget {
     Ip(IpAddr),
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+pub struct GeoSubdivision {
+    pub code: Option<String>,
+    pub name: Option<String>,
+}
+
 /// Fields shared by geolocation services. A missing field is distinct from a zero value.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct GeoRecord {
@@ -16,9 +22,12 @@ pub struct GeoRecord {
     pub network: Option<String>,
     pub country_code: Option<String>,
     pub country_name: Option<String>,
+    pub registered_country_code: Option<String>,
+    pub registered_country_name: Option<String>,
     pub continent_code: Option<String>,
     pub continent_name: Option<String>,
     pub region: Option<String>,
+    pub subdivisions: Vec<GeoSubdivision>,
     pub city: Option<String>,
     pub district: Option<String>,
     pub postal_code: Option<String>,

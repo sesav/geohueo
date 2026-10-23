@@ -1,12 +1,15 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
 
+use serde::Serialize;
+
 use crate::model::{GeoRecord, LookupResult};
 
 pub struct Output<W> {
     writer: W,
     json: bool,
     first: bool,
+    profile: Option<String>,
 }
 
 impl<W: Write> Output<W> {
@@ -15,16 +18,24 @@ impl<W: Write> Output<W> {
             writer,
             json,
             first: true,
+            profile: None,
         }
     }
 
+    pub fn for_profile(writer: W, json: bool, profile: &str) -> Self {
+        let mut output = Self::new(writer, json);
+        output.profile = Some(profile.to_string());
+        output
+    }
+
     /// Decoded legacy `success: false` responses are emitted in JSON mode only.
-    pub fn emit(&mut self, result: &LookupResult, label: &str) -> io::Result<()> {
+    pub fn emit(&mut self, result: &LookupResult, label: &str, target: &str) -> io::Result<()> {
         if self.json {
-            let json = result.legacy_json().ok_or_else(|| {
-                io::Error::new(io::ErrorKind::Unsupported, "provider has no JSON output")
-            })?;
-            writeln!(self.writer, "{json}")?;
+            if let Some(json) = result.legacy_json() {
+                writeln!(self.writer, "{json}")?;
+            } else {
+                self.write_normalized(target, result.success, Some(&result.record), None)?;
+            }
         } else if result.success {
             if !self.first {
                 writeln!(self.writer)?;
@@ -35,6 +46,49 @@ impl<W: Write> Output<W> {
         }
 
         Ok(())
+    }
+
+    pub fn emit_error(&mut self, target: &str, message: &str) -> io::Result<()> {
+        if self.json && self.profile.is_some() {
+            self.write_normalized(target, false, None, Some(message))?;
+        }
+        Ok(())
+    }
+
+    fn write_normalized(
+        &mut self,
+        target: &str,
+        success: bool,
+        data: Option<&GeoRecord>,
+        error: Option<&str>,
+    ) -> io::Result<()> {
+        #[derive(Serialize)]
+        struct Line<'a> {
+            schema_version: u8,
+            profile: &'a str,
+            target: &'a str,
+            success: bool,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            data: Option<&'a GeoRecord>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            error: Option<&'a str>,
+        }
+
+        let profile = self.profile.as_deref().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::Unsupported, "provider has no JSON output")
+        })?;
+        serde_json::to_writer(
+            &mut self.writer,
+            &Line {
+                schema_version: 1,
+                profile,
+                target,
+                success,
+                data,
+                error,
+            },
+        )?;
+        writeln!(self.writer)
     }
 }
 
@@ -61,7 +115,10 @@ fn render(info: &GeoRecord, label: &str) -> String {
         push_field(
             &mut out,
             "Coordinates",
-            &format!("{latitude:.4}, {longitude:.4}"),
+            &match info.accuracy_radius_km {
+                Some(radius) => format!("{latitude:.4}, {longitude:.4} (±{radius} km)"),
+                None => format!("{latitude:.4}, {longitude:.4}"),
+            },
         );
     }
     push_field(&mut out, "Timezone", field(&info.timezone_name));
@@ -187,10 +244,16 @@ mod tests {
         let mut output = Output::new(&mut bytes, false);
         let mut info = IpInfo::default();
 
-        output.emit(&legacy_result(&info), "failed").unwrap();
+        output
+            .emit(&legacy_result(&info), "failed", "failed")
+            .unwrap();
         info.success = true;
-        output.emit(&legacy_result(&info), "first").unwrap();
-        output.emit(&legacy_result(&info), "second").unwrap();
+        output
+            .emit(&legacy_result(&info), "first", "first")
+            .unwrap();
+        output
+            .emit(&legacy_result(&info), "second", "second")
+            .unwrap();
 
         assert_eq!(String::from_utf8(bytes).unwrap(), "first\n\nsecond\n");
     }
@@ -201,10 +264,14 @@ mod tests {
         let mut output = Output::new(&mut bytes, true);
         let mut info = IpInfo::default();
 
-        output.emit(&legacy_result(&info), "failed").unwrap();
+        output
+            .emit(&legacy_result(&info), "failed", "failed")
+            .unwrap();
         info.success = true;
         info.city = "a\nb".to_string();
-        output.emit(&legacy_result(&info), "successful").unwrap();
+        output
+            .emit(&legacy_result(&info), "successful", "successful")
+            .unwrap();
 
         let text = String::from_utf8(bytes).unwrap();
         let lines: Vec<serde_json::Value> = text
@@ -228,7 +295,7 @@ mod tests {
         let mut bytes = Vec::new();
 
         Output::new(&mut bytes, true)
-            .emit(&legacy_result(&info), "8.8.8.8")
+            .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
             .unwrap();
 
         assert_eq!(
@@ -257,7 +324,7 @@ mod tests {
         };
         for json in [false, true] {
             let error = Output::new(BrokenWriter, json)
-                .emit(&legacy_result(&info), "test")
+                .emit(&legacy_result(&info), "test", "test")
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         }

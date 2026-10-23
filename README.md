@@ -1,6 +1,7 @@
 # geohueo
 
-A command-line tool for finding IPv4/IPv6 and hostname locations using [geoiplookup.io](https://geoiplookup.io/api).
+A command-line tool for finding IPv4/IPv6 and hostname locations using [geoiplookup.io](https://geoiplookup.io/api)
+or MaxMind GeoIP/GeoLite web services.
 
 Since there wasn't a clear, easy tool for domain or IP info, I just built a small utility for fun. Hoping it helps
 others as well.
@@ -68,8 +69,8 @@ After installation, you can use `geohueo` instead of `./target/release/geohueo` 
 
 ## Configuration (source builds)
 
-The current source version supports named profiles for **geoiplookup.io**. MaxMind and other API adapters are planned but
-not yet available. Without a configuration file, the CLI behaves as before.
+The current source version supports named profiles for **geoiplookup.io**, **MaxMind GeoIP** and **MaxMind GeoLite**
+web services. Other API adapters are planned. Without a configuration file, the CLI behaves as before.
 
 Create `$XDG_CONFIG_HOME/geohueo/config.toml` (or `~/.config/geohueo/config.toml` on Linux if `XDG_CONFIG_HOME` is unset):
 
@@ -95,6 +96,38 @@ precedence. Request timeout priority is `--timeout`, profile `timeout_seconds`, 
 An absent default config file is allowed; a missing file explicitly selected with `--config` or `GEOHUEO_CONFIG` is an
 error (exit code 2). `--check-config` and `--list-profiles` do not make API requests. Help and version work even when
 the config is invalid. The built-in `geoiplookup` profile is always available.
+
+### MaxMind GeoIP / GeoLite
+
+Add a MaxMind profile to the TOML file (and optionally select it with `default_profile = "maxmind"`):
+
+```toml
+[profiles.maxmind]
+adapter = "maxmind"
+service = "geoip"           # "geoip" or "geolite"
+product = "city"            # "country", "city", or "insights" (GeoIP only)
+locales = ["ru", "en"]
+
+[profiles.maxmind.auth]
+type = "basic"
+username_env = "MAXMIND_ACCOUNT_ID"
+password_env = "MAXMIND_LICENSE_KEY"
+```
+
+Provide your **MaxMind account ID** and **license key** through these environment variables using your secret manager;
+do not put them in the TOML file or on the command line. Only the selected profile's credentials are read.
+
+```sh
+geohueo --profile maxmind --check-config
+geohueo --profile maxmind 8.8.8.8
+geohueo --profile maxmind -6 example.com
+geohueo --profile maxmind               # looks up the caller via MaxMind's /me endpoint
+```
+
+MaxMind GeoIP uses `geoip.maxmind.com`; GeoLite uses `geolite.info`. All requests use HTTPS and HTTP Basic Auth;
+authentication is not forwarded on redirects. Product access and usage limits depend on your MaxMind account.
+`--check-config` does not contact the service. A successful config check does not verify credentials or product access
+with MaxMind.
 
 ## Usage examples
 
@@ -181,6 +214,11 @@ Save multiple results to a file:
 Diagnostics go to stderr. Decoded API responses with `success: false` are still printed in JSON mode;
 DNS, network, HTTP, or response decoding failures do not produce a JSON object.
 
+For MaxMind, `--json` emits **normalized, versioned JSON Lines** instead of the legacy geoiplookup.io fields. Each
+target produces a line, including errors, with `schema_version`, `profile`, `target`, `success`, and either `data` or
+`error`. MaxMind Country responses may lack city, ISP and coordinates. Where provided, `accuracy_radius_km` represents
+the approximate uncertainty of coordinates. The original geoiplookup.io `--json` format is unchanged.
+
 ### Help and version
 
 Show all options:
@@ -227,3 +265,6 @@ and project use; commercial API use requires permission from the service provide
 [post@octosec.io](mailto:post@octosec.io) for commercial usage. The MIT license does not grant rights to use the
 external service or its data beyond the provider's terms. This is an unofficial client, not affiliated with
 geoiplookup.io.
+
+MaxMind services require a separate MaxMind account and are subject to [MaxMind's terms](https://www.maxmind.com/en/site-license-overview).
+This is an unofficial client; the MIT license does not grant access to MaxMind data.
