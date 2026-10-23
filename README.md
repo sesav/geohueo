@@ -21,11 +21,13 @@ Choose one of the following methods to make `geohueo` available from any directo
 
 ### Using Cargo (recommended)
 
-Once the package is published to crates.io, install it with Rust 1.85+:
+Install [geohueo from crates.io](https://crates.io/crates/geohueo) with Rust 1.85+:
 
 ```sh
 cargo install geohueo --locked
 ```
+
+To update an installed copy to the latest published version, run the same command again.
 
 To install from a source checkout instead, run from the repository root:
 
