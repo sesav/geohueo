@@ -1,0 +1,183 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  # A manual run builds and tests archives, but never publishes a release.
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Validate release version
+    runs-on: ubuntu-24.04
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      prerelease: ${{ steps.version.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Read and validate version
+        id: version
+        shell: python
+        run: |
+          import os
+          import tomllib
+          from pathlib import Path
+
+          version = tomllib.loads(Path("Cargo.toml").read_text())["package"]["version"]
+          tag = f"v{version}"
+          if os.environ["GITHUB_REF_TYPE"] == "tag" and os.environ["GITHUB_REF_NAME"] != tag:
+              raise SystemExit(f"Release tag must match Cargo.toml: expected {tag}")
+          prerelease = "-" in version.split("+", 1)[0]
+          with open(os.environ["GITHUB_OUTPUT"], "a") as output:
+              output.write(f"tag={tag}\nprerelease={str(prerelease).lower()}\n")
+      - name: Test installer
+        run: python3 tests/install.py
+
+  build:
+    name: Build (${{ matrix.target }})
+    needs: prepare
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            rustflags: -C linker=musl-gcc
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            rustflags: -C linker=musl-gcc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+            rustflags: ''
+          - os: macos-15
+            target: aarch64-apple-darwin
+            rustflags: ''
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            rustflags: -C target-feature=+crt-static
+    env:
+      TARGET: ${{ matrix.target }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      RUSTFLAGS: ${{ matrix.rustflags }}
+      MACOSX_DEPLOYMENT_TARGET: '11.0'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Install musl tools
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
+          echo 'CC=musl-gcc' >> "$GITHUB_ENV"
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal --target "$TARGET"
+      - name: Test on the target platform
+        run: cargo +stable test --locked --all-targets --target "$TARGET"
+      - name: Build release binary
+        run: cargo +stable build --release --locked --bin geohueo --target "$TARGET"
+      - name: Smoke-test release binary
+        run: |
+          binary="target/$TARGET/release/geohueo"
+          if [[ "$RUNNER_OS" == Windows ]]; then
+            binary="$binary.exe"
+          fi
+          "$binary" --version
+          "$binary" --help
+      - name: Verify static Linux binary
+        if: runner.os == 'Linux'
+        run: |
+          readelf --program-headers "target/$TARGET/release/geohueo" > program-headers.txt
+          if grep -q INTERP program-headers.txt; then
+            echo 'Linux release binary must not require a dynamic linker' >&2
+            exit 1
+          fi
+      - name: Package archive and checksum
+        shell: python
+        run: |
+          import hashlib
+          import os
+          import tarfile
+          import zipfile
+          from pathlib import Path
+
+          target = os.environ["TARGET"]
+          tag = os.environ["RELEASE_TAG"]
+          windows = target.endswith("-windows-msvc")
+          binary_name = "geohueo.exe" if windows else "geohueo"
+          files = [(Path("target") / target / "release" / binary_name, binary_name)]
+          files += [(Path(name), name) for name in ("LICENSE", "README.md", "CHANGELOG.md", "RELEASING.md")]
+          files += [(file, file.as_posix()) for file in sorted(Path("examples").rglob("*")) if file.is_file()]
+          Path("dist").mkdir()
+          extension = "zip" if windows else "tar.gz"
+          archive = Path("dist") / f"geohueo-{tag}-{target}.{extension}"
+          if windows:
+              with zipfile.ZipFile(archive, "w", compression=zipfile.ZIP_DEFLATED) as output:
+                  for file, name in files:
+                      output.write(file, arcname=name)
+          else:
+              with tarfile.open(archive, "w:gz") as output:
+                  for file, name in files:
+                      output.add(file, arcname=name)
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          Path(f"{archive}.sha256").write_text(f"{digest}  {archive.name}\n", encoding="ascii", newline="\n")
+      - name: Upload release artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    if: github.event_name == 'push'
+    needs: [prepare, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      RELEASE_TAG: ${{ needs.prepare.outputs.tag }}
+      PRERELEASE: ${{ needs.prepare.outputs.prerelease }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+      - name: Download release artifacts
+        uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          pattern: release-*
+          path: dist
+          merge-multiple: true
+      - name: Include installer
+        run: cp install.sh dist/install.sh
+      - name: Verify and collect checksums
+        working-directory: dist
+        run: |
+          sha256sum --check ./*.sha256
+          sha256sum install.sh > install.sh.sha256
+          cat ./*.sha256 > SHA256SUMS
+      - name: Publish only after every asset is uploaded
+        shell: bash
+        run: |
+          options=(--verify-tag --draft --title "$RELEASE_TAG" --generate-notes)
+          if [[ "$PRERELEASE" == true ]]; then
+            options+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" dist/* "${options[@]}"
+          gh release edit "$RELEASE_TAG" --draft=false
