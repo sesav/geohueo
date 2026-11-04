@@ -140,10 +140,11 @@ main() {
     case "$expected_checksum" in
         *[!0-9a-f]*) die 'invalid SHA-256 checksum' ;;
     esac
+    # Read from stdin so checksum tools cannot escape characters in the filename.
     if [ "$checksum_command" = sha256sum ]; then
-        actual_checksum=$(sha256sum "$temp_dir/$archive") || die 'could not calculate SHA-256'
+        actual_checksum=$(sha256sum < "$temp_dir/$archive") || die 'could not calculate SHA-256'
     else
-        actual_checksum=$(shasum -a 256 "$temp_dir/$archive") || die 'could not calculate SHA-256'
+        actual_checksum=$(shasum -a 256 < "$temp_dir/$archive") || die 'could not calculate SHA-256'
     fi
     actual_checksum=${actual_checksum%% *}
     [ "$actual_checksum" = "$expected_checksum" ] || die 'SHA-256 checksum mismatch; nothing was installed'

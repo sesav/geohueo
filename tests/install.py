@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -18,8 +19,8 @@ REPOSITORY = "https://github.com/sesav/geohueo"
 VERSION = "v1.2.3"
 BINARY = b"#!/bin/sh\nprintf 'geohueo 1.2.3\\n'\n"
 
-# Only HTTP and platform detection are mocked. Extraction, hashing, permissions,
-# and atomic replacement use the host's actual tools, with an isolated PATH.
+# HTTP and platform detection are mocked. File operations and hashing use real
+# tools, except when a test deliberately replaces a command to simulate failure.
 MOCK_CURL = r'''
 import json
 import os
@@ -38,9 +39,12 @@ if url.endswith("/releases/latest"):
 else:
     relative = url.split("/releases/download/", 1)[1]
     source = Path(os.environ["INSTALL_TEST_RELEASES"]) / relative
-    if not source.is_file() or source.name == os.environ.get("INSTALL_TEST_FAIL_ASSET"):
+    if not source.is_file():
         sys.exit(22)
     destination = args[args.index("--output") + 1]
+    if source.name == os.environ.get("INSTALL_TEST_FAIL_ASSET"):
+        Path(destination).write_bytes(source.read_bytes()[:16])
+        sys.exit(18)  # curl: partial download
     shutil.copyfile(source, destination)
 '''
 
@@ -152,7 +156,7 @@ class InstallerTests(unittest.TestCase):
         profile.write_text("# leave this alone\n")
         result = self.run_installer()
         self.assertEqual(self.destination.read_bytes(), BINARY)
-        self.assertTrue(os.access(self.destination, os.X_OK))
+        self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o755)
         self.assertEqual(profile.read_text(), "# leave this alone\n")
         self.assertFalse((self.home / ".bashrc").exists())
         self.assertIn("PATH", result.stdout)
@@ -177,8 +181,12 @@ class InstallerTests(unittest.TestCase):
 
     def test_existing_binary_can_be_replaced(self):
         self.existing_installation()
-        self.run_installer("--version", VERSION)
+        # An in-place overwrite changes this open file too; an atomic rename does not.
+        with self.destination.open("rb") as previous:
+            self.run_installer("--version", VERSION)
+            self.assertEqual(previous.read(), b"previous installation")
         self.assertEqual(self.destination.read_bytes(), BINARY)
+        self.assertEqual(stat.S_IMODE(self.destination.stat().st_mode), 0o755)
 
     def test_platform_mapping(self):
         for os_name, architecture, target in (
@@ -209,6 +217,15 @@ class InstallerTests(unittest.TestCase):
         self.run_installer("--version", VERSION, "--bin-dir", str(directory))
         self.assertEqual((directory / "geohueo").read_bytes(), BINARY)
 
+    def test_temporary_paths_with_special_characters(self):
+        for name in ("temporary\\downloads", "temporary\ndownloads"):
+            with self.subTest(name=name):
+                self.downloads = self.root / name
+                self.downloads.mkdir()
+                self.env["TMPDIR"] = str(self.downloads)
+                self.run_installer("--version", VERSION)
+                self.assertEqual(self.destination.read_bytes(), BINARY)
+
     def test_checksum_mismatch_preserves_existing_installation(self):
         self.existing_installation()
         with self.archive.open("ab") as output:
@@ -229,13 +246,22 @@ class InstallerTests(unittest.TestCase):
         for asset in (self.archive.name, self.archive.name + ".sha256"):
             with self.subTest(asset=asset):
                 self.env["INSTALL_TEST_FAIL_ASSET"] = asset
-                self.run_installer("--version", VERSION, success=False)
+                result = self.run_installer("--version", VERSION, success=False)
+                self.assertIn("could not download", result.stderr)
                 self.assertEqual(self.destination.read_bytes(), b"previous installation")
 
     def test_failed_staging_preserves_existing_installation(self):
         self.existing_installation()
-        self.write_command("cp", "#!/bin/sh\nexit 1\n")
-        self.run_installer("--version", VERSION, success=False)
+        self.write_command("cp", '#!/bin/sh\nprintf partial > "$2"\nexit 1\n')
+        result = self.run_installer("--version", VERSION, success=False)
+        self.assertIn("could not stage", result.stderr)
+        self.assertEqual(self.destination.read_bytes(), b"previous installation")
+
+    def test_failed_replacement_preserves_existing_installation(self):
+        self.existing_installation()
+        self.write_command("mv", "#!/bin/sh\nexit 1\n")
+        result = self.run_installer("--version", VERSION, success=False)
+        self.assertIn("could not install", result.stderr)
         self.assertEqual(self.destination.read_bytes(), b"previous installation")
 
     def test_corrupt_archive_is_rejected_even_with_matching_checksum(self):
@@ -265,19 +291,26 @@ class InstallerTests(unittest.TestCase):
         self.assertTrue(self.destination.is_symlink())
         self.assertEqual(original.read_text(), "original")
 
-    def test_shasum_fallback(self):
+    def use_shasum(self):
+        if not (self.commands / "shasum").exists():
+            self.skipTest("shasum is not installed")
         sha256sum = self.commands / "sha256sum"
         if sha256sum.exists():
             sha256sum.unlink()
-        self.write_command("shasum", f"#!{sys.executable}\n" + '''\
-import hashlib
-from pathlib import Path
-import sys
-assert sys.argv[1:3] == ["-a", "256"]
-print(hashlib.sha256(Path(sys.argv[3]).read_bytes()).hexdigest() + "  " + sys.argv[3])
-''')
+
+    def test_shasum_fallback(self):
+        self.use_shasum()
         self.run_installer("--version", VERSION)
         self.assertEqual(self.destination.read_bytes(), BINARY)
+
+    def test_shasum_mismatch_preserves_existing_installation(self):
+        self.use_shasum()
+        self.existing_installation()
+        with self.archive.open("ab") as output:
+            output.write(b"corrupted archive")
+        result = self.run_installer("--version", VERSION, success=False)
+        self.assertIn("SHA-256 checksum mismatch", result.stderr)
+        self.assertEqual(self.destination.read_bytes(), b"previous installation")
 
     def test_missing_checksum_tool_fails_before_download(self):
         for name in ("sha256sum", "shasum"):
