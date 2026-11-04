@@ -11,11 +11,11 @@ builds without publishing a release. Download the files from that run and check 
 
 ## Publish
 
-Push a tag that matches the version in `Cargo.toml`, with a `v` prefix. For example, for version `0.2.1`:
+Push a tag that matches the version in `Cargo.toml`, with a `v` prefix. For example, for version `0.3.0`:
 
 ```sh
-git tag v0.2.1
-git push origin v0.2.1
+git tag v0.3.0
+git push origin v0.3.0
 ```
 
 The tagged commit must include `.github/workflows/release.yml`. Old tags do not get binaries automatically. After all
