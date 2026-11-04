@@ -15,6 +15,8 @@ include = [
     "/Cargo.toml",
     "/Cargo.lock",
     "/README.md",
+    "/RELEASING.md",
+    "/install.sh",
     "/LICENSE",
     "/CHANGELOG.md",
     "/examples/**",

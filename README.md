@@ -1,14 +1,52 @@
 # geohueo
 
 geohueo is a command-line tool for looking up geolocation and network information for IP addresses and hostnames. It
-uses geoiplookup.io by default and requires no configuration or API credentials to get started.
+uses geoiplookup.io by default and **requires no configuration** or API credentials to get started.
 
 Provider profiles support MaxMind's free GeoLite and paid GeoIP web services, as well as custom HTTP GET APIs that
 return JSON. Configure profiles in TOML, select one per lookup, or set a default provider for subsequent lookups.
 
 ## Install
 
-Requires Rust 1.85+.
+### Linux and macOS
+
+Install the latest release without Rust:
+
+```sh
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+  https://github.com/sesav/geohueo/releases/latest/download/install.sh | sh
+```
+
+Works on Linux x86_64/ARM64 and macOS 11+ (Intel or Apple Silicon).
+The installer checks the download with SHA-256 and installs to `~/.local/bin` without `sudo`.
+If needed, add this folder to your `PATH`:
+
+```sh
+export PATH="$HOME/.local/bin:$PATH"
+```
+
+The command above runs a downloaded script. To read it before running it:
+
+```sh
+curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+  https://github.com/sesav/geohueo/releases/latest/download/install.sh -o install.sh
+less install.sh
+sh install.sh
+```
+
+Run `sh install.sh --help` for options to choose a version or install folder. Run the installer again to update.
+
+If binary downloads are not available for a release, use Cargo instead.
+
+### Windows and manual downloads
+
+Download the archive for your system from [GitHub Releases](https://github.com/sesav/geohueo/releases).
+For Windows 10+ (x86_64), extract the ZIP and put `geohueo.exe` in a folder on your `PATH`.
+Linux and macOS downloads use `.tar.gz` archives. Each archive has a `.sha256` file for checking the download.
+
+### Cargo
+
+Requires Rust 1.85+:
 
 ```sh
 cargo install geohueo --locked
@@ -22,7 +60,7 @@ cargo install --path . --locked
 
 For development, `cargo run -- 8.8.8.8` also works from the checkout.
 
-The binary is installed to `~/.cargo/bin`. Add it to your `PATH` if needed:
+Cargo installs the binary to `~/.cargo/bin` by default. Add it to your `PATH` if needed:
 
 ```sh
 export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"

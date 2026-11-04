@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Added
+
+- Ready-to-use binaries for Linux x86_64/ARM64, macOS Intel/Apple Silicon, and Windows x86_64.
+- A Linux/macOS installer that checks downloads with SHA-256 and does not need `sudo`.
+  You can choose the version and install folder.
+- Installer tests and a manual workflow to test release builds without publishing them.
+
 ## [0.2.0]
 
 ### Added
