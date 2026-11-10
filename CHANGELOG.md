@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.4.0]
+
 ### Added
 
 - JSON includes `resolved_ip`, even when the provider leaves out the IP field.
@@ -60,7 +62,8 @@ Initial release.
 - Human-readable output and JSON Lines output with `--json`.
 - Help, version information, and documented exit codes.
 
-[Unreleased]: https://github.com/sesav/geohueo/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/sesav/geohueo/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/sesav/geohueo/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/sesav/geohueo/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/sesav/geohueo/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/sesav/geohueo/releases/tag/v0.1.0
