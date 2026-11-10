@@ -1,5 +1,6 @@
 use std::fmt::Write as _;
 use std::io::{self, Write};
+use std::net::IpAddr;
 
 use serde::Serialize;
 
@@ -9,7 +10,6 @@ use crate::model::{GeoRecord, LookupResult};
 pub struct Output<W> {
     writer: W,
     json: bool,
-    first: bool,
     header_printed: bool,
     profile: Option<String>,
     provider: Option<String>,
@@ -20,7 +20,6 @@ impl<W: Write> Output<W> {
         Self {
             writer,
             json,
-            first: true,
             header_printed: false,
             profile: None,
             provider: None,
@@ -59,36 +58,45 @@ impl<W: Write> Output<W> {
         Ok(())
     }
 
-    /// The built-in legacy mode keeps its original response (including `success: false`).
-    pub fn emit(&mut self, result: &LookupResult, label: &str, target: &str) -> io::Result<()> {
+    /// All providers use the same JSON format.
+    pub fn emit(
+        &mut self,
+        result: &LookupResult,
+        target: &str,
+        resolved_ip: Option<IpAddr>,
+    ) -> io::Result<()> {
         if self.json {
-            if let Some(json) = result.legacy_json().filter(|_| self.profile.is_none()) {
-                writeln!(self.writer, "{json}")?;
-            } else if result.success {
-                self.write_normalized(target, true, Some(&result.record), None)?;
+            if result.success {
+                self.write_normalized(target, resolved_ip, true, Some(&result.record), None)?;
             } else {
                 self.write_normalized(
                     target,
+                    resolved_ip,
                     false,
                     None,
                     Some(&LookupError::new(ErrorCode::NoData, "no geolocation data")),
                 )?;
             }
         } else if result.success {
-            if !self.first {
-                writeln!(self.writer)?;
-            }
-
-            write!(self.writer, "{}", render(&result.record, label, target))?;
-            self.first = false;
+            let ip = resolved_ip.map(|ip| ip.to_string());
+            write!(
+                self.writer,
+                "{}",
+                render(&result.record, ip.as_deref().unwrap_or(target), target)
+            )?;
         }
 
         Ok(())
     }
 
-    pub fn emit_error(&mut self, target: &str, error: &LookupError) -> io::Result<()> {
-        if self.json && self.profile.is_some() {
-            self.write_normalized(target, false, None, Some(error))?;
+    pub fn emit_error(
+        &mut self,
+        target: &str,
+        resolved_ip: Option<IpAddr>,
+        error: &LookupError,
+    ) -> io::Result<()> {
+        if self.json {
+            self.write_normalized(target, resolved_ip, false, None, Some(error))?;
         }
         Ok(())
     }
@@ -96,6 +104,7 @@ impl<W: Write> Output<W> {
     fn write_normalized(
         &mut self,
         target: &str,
+        resolved_ip: Option<IpAddr>,
         success: bool,
         data: Option<&GeoRecord>,
         error: Option<&LookupError>,
@@ -107,6 +116,7 @@ impl<W: Write> Output<W> {
             #[serde(skip_serializing_if = "Option::is_none")]
             provider: Option<&'a str>,
             target: &'a str,
+            resolved_ip: Option<IpAddr>,
             success: bool,
             #[serde(skip_serializing_if = "Option::is_none")]
             data: Option<&'a GeoRecord>,
@@ -124,6 +134,7 @@ impl<W: Write> Output<W> {
                 profile,
                 provider: self.provider.as_deref(),
                 target,
+                resolved_ip,
                 success,
                 data,
                 error,
@@ -328,58 +339,47 @@ mod tests {
     }
 
     #[test]
-    fn separates_only_successful_text_results() {
-        let mut bytes = Vec::new();
-        let mut output = Output::new(&mut bytes, false);
-        let mut info = IpInfo::default();
-
-        output
-            .emit(&legacy_result(&info), "failed", "failed")
-            .unwrap();
-        info.success = true;
-        output
-            .emit(&legacy_result(&info), "first", "first")
-            .unwrap();
-        output
-            .emit(&legacy_result(&info), "second", "second")
-            .unwrap();
-
-        let first = render(&GeoRecord::default(), "first", "first");
-        let second = render(&GeoRecord::default(), "second", "second");
-        assert_eq!(
-            String::from_utf8(bytes).unwrap(),
-            format!("{first}\n{second}")
-        );
+    fn text_output_has_no_extra_blank_lines() {
+        for success in [false, true] {
+            let mut bytes = Vec::new();
+            let info = LookupResult::new(GeoRecord::default(), success);
+            Output::new(&mut bytes, false)
+                .emit(&info, "8.8.8.8", None)
+                .unwrap();
+            let expected = if success {
+                render(&info.record, "8.8.8.8", "8.8.8.8")
+            } else {
+                String::new()
+            };
+            assert_eq!(String::from_utf8(bytes).unwrap(), expected);
+        }
     }
 
     #[test]
-    fn emits_one_json_object_per_line_including_failed_lookups() {
-        let mut bytes = Vec::new();
-        let mut output = Output::new(&mut bytes, true);
-        let mut info = IpInfo::default();
-
-        output
-            .emit(&legacy_result(&info), "failed", "failed")
-            .unwrap();
-        info.success = true;
-        info.city = "a\nb".to_string();
-        output
-            .emit(&legacy_result(&info), "successful", "successful")
-            .unwrap();
-
-        let text = String::from_utf8(bytes).unwrap();
-        let lines: Vec<serde_json::Value> = text
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0]["success"], false);
-        assert_eq!(lines[1]["success"], true);
-        assert_eq!(lines[1]["city"], "a\nb");
+    fn json_output_is_one_object_for_success_or_failure() {
+        for success in [false, true] {
+            let mut bytes = Vec::new();
+            let info = IpInfo {
+                success,
+                city: "a\nb".into(),
+                ..IpInfo::default()
+            };
+            Output::for_profile(&mut bytes, true, "geoiplookup")
+                .emit(&legacy_result(&info), "8.8.8.8", None)
+                .unwrap();
+            let result: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(result["success"], success);
+            if success {
+                assert_eq!(result["data"]["city"], "a\nb");
+            } else {
+                assert_eq!(result["error"]["code"], "no_data");
+                assert!(result.get("data").is_none());
+            }
+        }
     }
 
     #[test]
-    fn legacy_json_output_matches_original_dto_serialization() {
+    fn geoiplookup_json_uses_the_normalized_schema_instead_of_its_legacy_payload() {
         let info = IpInfo {
             ip: "8.8.8.8".to_string(),
             latitude: Some(0.0),
@@ -388,14 +388,22 @@ mod tests {
         };
         let mut bytes = Vec::new();
 
-        Output::new(&mut bytes, true)
-            .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
+        Output::for_profile(&mut bytes, true, "geoiplookup")
+            .emit(
+                &legacy_result(&info),
+                "8.8.8.8",
+                Some("8.8.8.8".parse().unwrap()),
+            )
             .unwrap();
 
-        assert_eq!(
-            String::from_utf8(bytes).unwrap(),
-            format!("{}\n", serde_json::to_string(&info).unwrap())
-        );
+        let line: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(line["schema_version"], 1);
+        assert_eq!(line["profile"], "geoiplookup");
+        assert_eq!(line["target"], "8.8.8.8");
+        assert_eq!(line["resolved_ip"], "8.8.8.8");
+        assert_eq!(line["data"]["latitude"], 0.0);
+        assert!(line.get("latitude").is_none());
+        assert!(line.get("premium").is_none());
     }
 
     #[test]
@@ -406,13 +414,21 @@ mod tests {
             success: true,
             ..IpInfo::default()
         };
-        let mut legacy = Vec::new();
-        Output::new(&mut legacy, true)
-            .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
+        let mut geoiplookup = Vec::new();
+        let mut output = Output::for_profile(&mut geoiplookup, true, "geoiplookup");
+        output.set_provider("geoiplookup.io");
+        output
+            .emit(
+                &legacy_result(&info),
+                "8.8.8.8",
+                Some("8.8.8.8".parse().unwrap()),
+            )
             .unwrap();
         assert_eq!(
-            jsonl_text(&legacy),
-            jsonl_text(include_bytes!("../examples/jsonl/legacy.jsonl"))
+            jsonl_text(&geoiplookup),
+            jsonl_text(include_bytes!(
+                "../examples/jsonl/geoiplookup-success.jsonl"
+            ))
         );
 
         let record = GeoRecord {
@@ -426,7 +442,11 @@ mod tests {
         let mut output = Output::for_profile(&mut normalized, true, "maxmind");
         output.set_provider("maxmind geoip city");
         output
-            .emit(&LookupResult::new(record, true), "8.8.8.8", "8.8.8.8")
+            .emit(
+                &LookupResult::new(record, true),
+                "8.8.8.8",
+                Some("8.8.8.8".parse().unwrap()),
+            )
             .unwrap();
         assert_eq!(
             jsonl_text(&normalized),
@@ -441,7 +461,11 @@ mod tests {
         let mut output = Output::for_profile(&mut failure, true, "geoiplookup");
         output.set_provider("geoiplookup.io");
         output
-            .emit(&legacy_result(&info), "8.8.8.8", "8.8.8.8")
+            .emit(
+                &legacy_result(&info),
+                "8.8.8.8",
+                Some("8.8.8.8".parse().unwrap()),
+            )
             .unwrap();
         assert_eq!(
             jsonl_text(&failure),
@@ -457,6 +481,7 @@ mod tests {
         output
             .emit_error(
                 "bad\nname",
+                None,
                 &LookupError::new(ErrorCode::Dns, "cannot resolve"),
             )
             .unwrap();
@@ -494,17 +519,13 @@ mod tests {
             ..IpInfo::default()
         };
         for json in [false, true] {
-            let error = Output::new(BrokenWriter, json)
-                .emit(&legacy_result(&info), "test", "test")
+            let error = Output::for_profile(BrokenWriter, json, "geoiplookup")
+                .emit(&legacy_result(&info), "test", None)
                 .unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
         }
         let error = Output::for_profile(BrokenWriter, true, "maxmind")
-            .emit(
-                &LookupResult::new(GeoRecord::default(), true),
-                "test",
-                "test",
-            )
+            .emit(&LookupResult::new(GeoRecord::default(), true), "test", None)
             .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }

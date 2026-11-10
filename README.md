@@ -13,8 +13,7 @@ return JSON. Configure profiles in TOML, select one per lookup, or set a default
 Install the latest release without Rust:
 
 ```sh
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-  https://github.com/sesav/geohueo/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/sesav/geohueo/releases/latest/download/install.sh | sh
 ```
 
 Works on Linux x86_64/ARM64 and macOS 11+ (Intel or Apple Silicon).
@@ -28,8 +27,7 @@ export PATH="$HOME/.local/bin:$PATH"
 The command above runs a downloaded script. To read it before running it:
 
 ```sh
-curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
-  https://github.com/sesav/geohueo/releases/latest/download/install.sh -o install.sh
+curl -fsSL https://github.com/sesav/geohueo/releases/latest/download/install.sh -o install.sh
 less install.sh
 sh install.sh
 ```
@@ -72,11 +70,12 @@ export PATH="${CARGO_HOME:-$HOME/.cargo}/bin:$PATH"
 geohueo 8.8.8.8
 geohueo example.com
 geohueo                  # this machine's public IP
-geohueo 8.8.8.8 1.1.1.1 # several targets
 geohueo -4 example.com   # IPv4 only
 geohueo -6 example.com   # IPv6 only
 geohueo --timeout 5 example.com
 ```
+
+Each command accepts one IP address or hostname. For hostnames, geohueo picks an address supported by the provider.
 
 ### geoiplookup.io (default)
 
@@ -113,31 +112,42 @@ prints:
 
 ```json
 {
-  "ip": "1.1.1.1",
-  "isp": "Cloudflare, Inc.",
-  "org": "",
-  "hostname": "",
-  "latitude": -33.8688,
-  "longitude": 151.209,
-  "postal_code": "",
-  "city": "Sydney",
-  "country_code": "AU",
-  "country_name": "Australia",
-  "continent_code": "OC",
-  "continent_name": "Oceania",
-  "region": "New South Wales",
-  "district": "",
-  "timezone_name": "Australia/Sydney",
-  "connection_type": "Corporate",
-  "asn_number": 13335,
-  "asn_org": "Cloudflare, Inc.",
-  "asn": "AS13335 - Cloudflare, Inc.",
-  "currency_code": "AUD",
-  "currency_name": "Australian Dollar",
-  "language_code": "en",
-  "language_name": "English",
+  "schema_version": 1,
+  "profile": "geoiplookup",
+  "provider": "geoiplookup.io",
+  "target": "1.1.1.1",
+  "resolved_ip": "1.1.1.1",
   "success": true,
-  "premium": false
+  "data": {
+    "ip": "1.1.1.1",
+    "network": null,
+    "country_code": "AU",
+    "country_name": "Australia",
+    "registered_country_code": null,
+    "registered_country_name": null,
+    "continent_code": "OC",
+    "continent_name": "Oceania",
+    "region": "New South Wales",
+    "subdivisions": [],
+    "city": "Sydney",
+    "district": null,
+    "postal_code": null,
+    "latitude": -33.8688,
+    "longitude": 151.209,
+    "accuracy_radius_km": null,
+    "timezone_name": "Australia/Sydney",
+    "isp": "Cloudflare, Inc.",
+    "org": null,
+    "asn_number": 13335,
+    "asn_org": "Cloudflare, Inc.",
+    "asn": "AS13335 - Cloudflare, Inc.",
+    "connection_type": "Corporate",
+    "hostname": null,
+    "currency_code": "AUD",
+    "currency_name": "Australian Dollar",
+    "language_code": "en",
+    "language_name": "English"
+  }
 }
 ```
 
@@ -176,6 +186,7 @@ prints:
   "profile": "geolite",
   "provider": "maxmind geolite city",
   "target": "8.8.8.8",
+  "resolved_ip": "8.8.8.8",
   "success": true,
   "data": {
     "ip": "8.8.8.8",
@@ -210,30 +221,23 @@ prints:
 }
 ```
 
-The JSON examples are pretty-printed for readability; geohueo writes one compact JSON object per line.
+The JSON examples are pretty-printed for readability; geohueo writes one compact JSON object.
 
-`--json` keeps the original format for geoiplookup and uses normalized JSON for MaxMind and REST/JSON profiles. To force
-normalized JSON for any profile (including geoiplookup):
-
-```sh
-geohueo --output normalized-json 8.8.8.8
-```
-
-`--json` and `--output` cannot be combined.
-
-Normalized JSON Lines produce one result per target, including lookup failures. Failures contain an `error` object
-instead of `data`, with a stable `code`, a diagnostic `message`, and an optional `http_status`:
+`-j` and `--json` use the same format for every provider. Lookup details are under `data`. Failed lookups contain an
+`error` object instead, with a stable `code`, a diagnostic `message`, and an optional `http_status`:
 
 ```json
-{"schema_version":1,"profile":"geolite","provider":"maxmind geolite city","target":"8.8.8.8","success":false,"error":{"code":"authentication","message":"MaxMind HTTP 401: invalid MaxMind credentials","http_status":401}}
+{"schema_version":1,"profile":"geolite","provider":"maxmind geolite city","target":"8.8.8.8","resolved_ip":"8.8.8.8","success":false,"error":{"code":"authentication","message":"MaxMind HTTP 401: invalid MaxMind credentials","http_status":401}}
 ```
+
+`resolved_ip` is the address used for the lookup. It is kept even if the provider leaves out the IP field or the request
+fails. It is `null` when the address is not known.
 
 Lookup error codes are `dns`, `timeout`, `transport`, `http`, `authentication`, `permission_denied`, `quota_exceeded`,
 `rate_limited`, `decode`, `mapping`, `no_data`, `unsupported_capability`, and `api` (a REST/JSON success rule or error
 field reports failure). `provider` is the fallback for an unclassified third-party provider error. Use `code` for
 programmatic handling; message wording is not a stable contract. Configuration and missing-credential errors stop
-execution before lookups, write diagnostics to stderr, and return exit code 2 without emitting per-target JSON. The
-legacy geoiplookup.io `--json` format remains unchanged.
+execution before the lookup, write diagnostics to stderr, and return exit code 2 without JSON output.
 
 For hostnames, `IP` is the resolved address and `Target` is the hostname.
 

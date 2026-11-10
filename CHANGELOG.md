@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- JSON includes `resolved_ip`, even when the provider leaves out the IP field.
+
+### Changed
+
+- **Breaking:** `--json` uses the same format for all providers. Lookup fields are now under `data`.
+- **Breaking:** Each command accepts one IP address or hostname.
+
+### Removed
+
+- `--output normalized-json`. Use `--json` instead.
+
+### Fixed
+
+- Hostnames use a DNS address supported by the selected provider.
+
 ## [0.3.0]
 
 ### Added

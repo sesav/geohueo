@@ -8,13 +8,13 @@ use anyhow::{Context, Result};
 use crate::cli::{self, Args, Command};
 use crate::config::{Adapter, Config, SelectedProfile};
 use crate::error::{ErrorCode, LookupError};
-use crate::model::LookupTarget;
+use crate::model::{LookupResult, LookupTarget};
 use crate::output::Output;
 use crate::provider::GeoProvider;
 use crate::provider::configurable;
 use crate::provider::geoiplookup::Client;
 use crate::provider::maxmind;
-use crate::target::{no_data_message, resolve};
+use crate::target::{AddressFamily, no_data_message, resolve_for_provider};
 
 pub fn is_broken_pipe(error: &anyhow::Error) -> bool {
     error
@@ -99,10 +99,14 @@ fn run(
     match profile.adapter {
         Adapter::Geoiplookup => {
             let client = Client::new(profile.timeout);
-            // The legacy JSON contract has no profile field, so keep it in its
-            // original mode. Text output and normalized JSON can identify it.
-            let name = (args.normalized_json || !args.json).then_some(profile.name.as_str());
-            run_with_provider(args, &client, name, Some(&provider_label), stdout, stderr)
+            run_with_provider(
+                args,
+                &client,
+                Some(&profile.name),
+                Some(&provider_label),
+                stdout,
+                stderr,
+            )
         }
         Adapter::Maxmind(settings) => {
             let client = maxmind::Client::new(settings, profile.timeout);
@@ -137,140 +141,123 @@ fn run_with_provider(
     stdout: &mut impl Write,
     stderr: &mut impl Write,
 ) -> Result<u8> {
-    let mut output = match (args.normalized_json, profile) {
-        (true, name) => Output::for_profile(stdout, true, name.unwrap_or("geoiplookup")),
-        (false, Some(name)) => Output::for_profile(stdout, args.json, name),
-        (false, None) => Output::new(stdout, args.json),
+    let mut output = match profile {
+        Some(name) => Output::for_profile(stdout, args.json, name),
+        None if args.json => Output::for_profile(stdout, true, "geoiplookup"),
+        None => Output::new(stdout, false),
     };
     if let Some(label) = provider_label {
         output.set_provider(label);
     }
     output.write_header()?;
-    let mut failed = false;
-    let mut unsupported = false;
+    emit_outcome(
+        lookup(args.target, provider, args.family),
+        &mut output,
+        stderr,
+    )
+}
 
-    if args.targets.is_empty() {
-        return Ok(lookup(
-            provider,
-            None,
-            "current IP",
-            "current IP",
-            &mut output,
-            stderr,
-        )?
-        .exit_code());
-    }
+struct Outcome {
+    target: String,
+    resolved_ip: Option<IpAddr>,
+    result: std::result::Result<LookupResult, LookupError>,
+}
 
-    for input in &args.targets {
-        let target = match resolve(input, args.family) {
-            Ok(target) => target,
-            Err(message) => {
-                output.emit_error(input, &LookupError::new(ErrorCode::Dns, &message))?;
-                writeln!(stderr, "geohueo: {message}")?;
-                failed = true;
-                continue;
+fn lookup(input: Option<String>, provider: &dyn GeoProvider, family: AddressFamily) -> Outcome {
+    let mut outcome = Outcome {
+        target: input.clone().unwrap_or_else(|| "current IP".into()),
+        resolved_ip: None,
+        result: Err(LookupError::new(
+            ErrorCode::UnsupportedCapability,
+            "target is not supported by this profile",
+        )),
+    };
+    let target = if let Some(input) = input {
+        match resolve_for_provider(&input, family, provider.capabilities()) {
+            Ok(target) => {
+                outcome.resolved_ip = Some(target.ip());
+                LookupTarget::Ip(target.ip())
             }
-        };
-
-        match lookup(
-            provider,
-            Some(target.ip()),
-            &target.label(),
-            input,
-            &mut output,
-            stderr,
-        )? {
-            LookupStatus::Success => {}
-            LookupStatus::Failure => failed = true,
-            LookupStatus::Unsupported => unsupported = true,
+            Err(message) => {
+                outcome.result = Err(LookupError::new(ErrorCode::Dns, message));
+                return outcome;
+            }
+        }
+    } else {
+        LookupTarget::SelfIp
+    };
+    if !provider.capabilities().supports(target) {
+        return outcome;
+    }
+    outcome.result = provider
+        .lookup(target)
+        .map_err(|error| LookupError::from_error(&error, ErrorCode::Provider));
+    if outcome.resolved_ip.is_none() {
+        if let Ok(result) = &outcome.result {
+            outcome.resolved_ip = result.record.ip.as_deref().and_then(|ip| ip.parse().ok());
         }
     }
-
-    Ok(if unsupported { 2 } else { u8::from(failed) })
+    outcome
 }
 
-enum LookupStatus {
-    Success,
-    Failure,
-    Unsupported,
-}
-
-impl LookupStatus {
-    fn exit_code(self) -> u8 {
-        match self {
-            Self::Success => 0,
-            Self::Failure => 1,
-            Self::Unsupported => 2,
-        }
-    }
-}
-
-fn lookup(
-    provider: &dyn GeoProvider,
-    ip: Option<IpAddr>,
-    label: &str,
-    target: &str,
+fn emit_outcome(
+    outcome: Outcome,
     output: &mut Output<impl Write>,
     stderr: &mut impl Write,
-) -> Result<LookupStatus> {
-    let lookup_target = ip.map_or(LookupTarget::SelfIp, LookupTarget::Ip);
-    if !provider.capabilities().supports(lookup_target) {
-        let message = "target is not supported by this profile";
-        output.emit_error(
-            target,
-            &LookupError::new(ErrorCode::UnsupportedCapability, message),
-        )?;
-        writeln!(stderr, "geohueo: {label}: {message}")?;
-        return Ok(LookupStatus::Unsupported);
-    }
-    let info = match provider.lookup(lookup_target) {
+) -> Result<u8> {
+    let Outcome {
+        target,
+        resolved_ip,
+        result,
+    } = outcome;
+    let label = match resolved_ip {
+        Some(ip) if target != "current IP" && target != ip.to_string() => {
+            format!("{target} ({ip})")
+        }
+        Some(ip) => ip.to_string(),
+        None => target.clone(),
+    };
+    let info = match result {
         Ok(info) => info,
         Err(error) => {
-            output.emit_error(
-                target,
-                &LookupError::from_error(&error, ErrorCode::Provider),
-            )?;
-            writeln!(stderr, "geohueo: {label}: lookup failed: {error:#}")?;
-            return Ok(LookupStatus::Failure);
+            output.emit_error(&target, resolved_ip, &error)?;
+            if error.code == ErrorCode::Dns && resolved_ip.is_none() && target != "current IP" {
+                writeln!(stderr, "geohueo: {error}")?;
+            } else if error.code == ErrorCode::UnsupportedCapability {
+                writeln!(stderr, "geohueo: {label}: {error}")?;
+            } else {
+                writeln!(stderr, "geohueo: {label}: lookup failed: {error}")?;
+            }
+            return Ok(if error.code == ErrorCode::UnsupportedCapability {
+                2
+            } else {
+                1
+            });
         }
     };
 
-    let display_label = if ip.is_none() {
-        info.record.ip.as_deref().unwrap_or(label)
-    } else {
-        label
-    };
-    let resolved_ip = ip.map(|ip| ip.to_string());
     output
-        .emit(
-            &info,
-            resolved_ip.as_deref().unwrap_or(display_label),
-            target,
-        )
-        .with_context(|| format!("could not write result for {display_label} to stdout"))?;
+        .emit(&info, &target, resolved_ip)
+        .with_context(|| format!("could not write result for {label} to stdout"))?;
 
     if !info.success {
         writeln!(
             stderr,
-            "geohueo: {display_label}: {}",
+            "geohueo: {label}: {}",
             no_data_message(
-                ip.or_else(|| info.record.ip.as_deref().and_then(|ip| ip.parse().ok()))
+                resolved_ip.or_else(|| info.record.ip.as_deref().and_then(|ip| ip.parse().ok()))
             )
         )?;
     }
 
-    Ok(if info.success {
-        LookupStatus::Success
-    } else {
-        LookupStatus::Failure
-    })
+    Ok(u8::from(!info.success))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::{MaxMindProduct, MaxMindService, MaxMindSettings};
-    use crate::model::{GeoRecord, LookupResult};
+    use crate::model::GeoRecord;
     use crate::provider::Capabilities;
     use crate::test_support::{Response, TestServer, unavailable_client};
     use std::cell::RefCell;
@@ -307,37 +294,34 @@ mod tests {
 
     #[test]
     fn app_can_run_with_a_provider_without_an_http_client() {
-        let provider = StubProvider {
-            targets: RefCell::new(Vec::new()),
-        };
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let args = Args {
-            targets: vec!["8.8.8.8".to_string(), "2001:4860:4860::8888".to_string()],
-            ..Args::default()
-        };
-
-        let code =
-            run_with_provider(args, &provider, None, None, &mut stdout, &mut stderr).unwrap();
-
-        assert_eq!(code, 0);
-        assert!(stderr.is_empty());
-        assert!(
-            String::from_utf8(stdout)
-                .unwrap()
-                .contains("Country:         US")
-        );
-        assert_eq!(
-            *provider.targets.borrow(),
-            [
-                LookupTarget::Ip("8.8.8.8".parse().unwrap()),
-                LookupTarget::Ip("2001:4860:4860::8888".parse().unwrap()),
-            ]
-        );
+        for input in ["8.8.8.8", "2001:4860:4860::8888"] {
+            let provider = StubProvider {
+                targets: RefCell::new(Vec::new()),
+            };
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let args = Args {
+                target: Some(input.into()),
+                ..Args::default()
+            };
+            let code =
+                run_with_provider(args, &provider, None, None, &mut stdout, &mut stderr).unwrap();
+            assert_eq!(code, 0);
+            assert!(stderr.is_empty());
+            assert!(
+                String::from_utf8(stdout)
+                    .unwrap()
+                    .contains("Country:         US")
+            );
+            assert_eq!(
+                *provider.targets.borrow(),
+                [LookupTarget::Ip(input.parse().unwrap())]
+            );
+        }
     }
 
     #[test]
-    fn app_uses_self_target_for_empty_input() {
+    fn app_uses_self_target_when_no_host_is_given() {
         let provider = StubProvider {
             targets: RefCell::new(Vec::new()),
         };
@@ -386,32 +370,38 @@ mod tests {
                 ))
             }
         }
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run_with_provider(
-            Args {
-                targets: vec!["localhost".into(), "8.8.8.8".into()],
-                ..Args::default()
-            },
-            &WithoutIp,
-            Some("custom"),
-            Some("rest-json fixture"),
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-        assert_eq!(code, 0);
-        assert!(stderr.is_empty());
-        let text = String::from_utf8(stdout).unwrap();
-        let addresses: Vec<IpAddr> = text
-            .lines()
-            .filter_map(|line| line.trim().strip_prefix("IP:"))
-            .map(|ip| ip.trim().parse().unwrap())
-            .collect();
-        assert_eq!(addresses.len(), 2);
-        assert!(addresses[0].is_loopback());
-        assert_eq!(addresses[1], "8.8.8.8".parse::<IpAddr>().unwrap());
-        assert!(text.contains("Target:          localhost"));
+        for input in ["localhost", "8.8.8.8"] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_with_provider(
+                Args {
+                    target: Some(input.into()),
+                    ..Args::default()
+                },
+                &WithoutIp,
+                Some("custom"),
+                Some("rest-json fixture"),
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+            assert_eq!(code, 0);
+            assert!(stderr.is_empty());
+            let text = String::from_utf8(stdout).unwrap();
+            let ip: IpAddr = text
+                .lines()
+                .find_map(|line| line.trim().strip_prefix("IP:"))
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            if input == "localhost" {
+                assert!(ip.is_loopback());
+                assert!(text.contains("Target:          localhost"));
+            } else {
+                assert_eq!(ip, "8.8.8.8".parse::<IpAddr>().unwrap());
+            }
+        }
     }
 
     #[test]
@@ -424,8 +414,8 @@ mod tests {
 
         let code = run_with_provider(
             Args {
-                normalized_json: true,
-                targets: vec!["localhost".to_string()],
+                json: true,
+                target: Some("localhost".to_string()),
                 ..Args::default()
             },
             &provider,
@@ -442,10 +432,142 @@ mod tests {
         assert_eq!(line["profile"], "test");
         assert_eq!(line["provider"], "rest-json test");
         assert_eq!(line["target"], "localhost");
+        assert!(
+            line["resolved_ip"]
+                .as_str()
+                .unwrap()
+                .parse::<IpAddr>()
+                .unwrap()
+                .is_loopback()
+        );
     }
 
     #[test]
-    fn unavailable_api_returns_failure_without_stdout_in_both_formats() {
+    fn hostname_selects_supported_ipv4_and_keeps_it_when_api_omits_ip_or_fails() {
+        use crate::error::LookupError;
+
+        struct Ipv4Provider {
+            fail: bool,
+        }
+        impl GeoProvider for Ipv4Provider {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    ipv4: true,
+                    ipv6: false,
+                    self_ip: false,
+                }
+            }
+            fn lookup(&self, target: LookupTarget) -> Result<LookupResult> {
+                assert_eq!(target, LookupTarget::Ip("127.0.0.1".parse().unwrap()));
+                if self.fail {
+                    return Err(LookupError::http(503, "unavailable").into());
+                }
+                Ok(LookupResult::new(GeoRecord::default(), true))
+            }
+        }
+        for fail in [false, true] {
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_with_provider(
+                Args {
+                    json: true,
+                    target: Some("localhost".into()),
+                    ..Args::default()
+                },
+                &Ipv4Provider { fail },
+                Some("fixture"),
+                None,
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+            assert_eq!(code, u8::from(fail));
+            let line: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+            assert_eq!(line["target"], "localhost");
+            assert_eq!(line["resolved_ip"], "127.0.0.1");
+            if fail {
+                assert_eq!(line["error"]["http_status"], 503);
+            } else {
+                assert!(line["data"]["ip"].is_null());
+                assert!(stderr.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn http_errors_are_reported_without_retrying() {
+        for status in [429, 503] {
+            let server = TestServer::new(vec![
+                Response::Http { status, body: "{}" },
+                Response::Http {
+                    status: 200,
+                    body: r#"{"success":true}"#,
+                },
+            ]);
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            let code = run_with_provider(
+                Args {
+                    json: true,
+                    target: Some("8.8.8.8".into()),
+                    ..Args::default()
+                },
+                &server.client(),
+                Some("geoiplookup"),
+                None,
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+            assert_eq!(code, 1);
+            let result: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+            assert_eq!(result["resolved_ip"], "8.8.8.8");
+            assert_eq!(result["success"], false);
+            assert_eq!(result["error"]["http_status"], status);
+            assert!(result.get("data").is_none());
+            assert_eq!(server.requests(), ["GET /8.8.8.8 HTTP/1.1"]);
+        }
+    }
+
+    #[test]
+    fn unsupported_ip_keeps_resolved_metadata_without_a_provider_request() {
+        struct Ipv4Only;
+        impl GeoProvider for Ipv4Only {
+            fn capabilities(&self) -> Capabilities {
+                Capabilities {
+                    ipv4: true,
+                    ipv6: false,
+                    self_ip: false,
+                }
+            }
+            fn lookup(&self, _: LookupTarget) -> Result<LookupResult> {
+                panic!("unsupported IP must not reach the provider")
+            }
+        }
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let code = run_with_provider(
+            Args {
+                json: true,
+                target: Some("2001:db8::1".into()),
+                ..Args::default()
+            },
+            &Ipv4Only,
+            Some("fixture"),
+            None,
+            &mut stdout,
+            &mut stderr,
+        )
+        .unwrap();
+        assert_eq!(code, 2);
+        let result: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+        assert_eq!(result["target"], "2001:db8::1");
+        assert_eq!(result["resolved_ip"], "2001:db8::1");
+        assert_eq!(result["error"]["code"], "unsupported_capability");
+    }
+
+    #[test]
+    fn unavailable_api_returns_failure_and_a_json_error_when_requested() {
         for json in [false, true] {
             let server = TestServer::new(vec![Response::Http {
                 status: 503,
@@ -467,7 +589,15 @@ mod tests {
             .unwrap();
 
             assert_eq!(code, 1);
-            assert!(stdout.is_empty());
+            if json {
+                let line: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+                assert_eq!(line["target"], "current IP");
+                assert!(line["resolved_ip"].is_null());
+                assert_eq!(line["success"], false);
+                assert_eq!(line["error"]["http_status"], 503);
+            } else {
+                assert!(stdout.is_empty());
+            }
             let diagnostic = String::from_utf8(stderr).unwrap();
             assert!(diagnostic.contains("current IP: lookup failed"));
             assert!(diagnostic.contains("request to"));
@@ -484,7 +614,7 @@ mod tests {
             let code = run_with_provider(
                 Args {
                     json,
-                    targets: vec!["8.8.8.8".to_string()],
+                    target: Some("8.8.8.8".to_string()),
                     ..Args::default()
                 },
                 &unavailable_client(),
@@ -496,7 +626,15 @@ mod tests {
             .unwrap();
 
             assert_eq!(code, 1);
-            assert!(stdout.is_empty());
+            if json {
+                let line: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
+                assert_eq!(line["target"], "8.8.8.8");
+                assert_eq!(line["resolved_ip"], "8.8.8.8");
+                assert_eq!(line["success"], false);
+                assert!(line.get("data").is_none());
+            } else {
+                assert!(stdout.is_empty());
+            }
             let diagnostic = String::from_utf8(stderr).unwrap();
             assert!(diagnostic.contains("8.8.8.8: lookup failed"));
             assert!(diagnostic.contains("request to"));
@@ -504,50 +642,7 @@ mod tests {
     }
 
     #[test]
-    fn api_failure_does_not_stop_remaining_targets_or_reset_failure_status() {
-        let server = TestServer::new(vec![
-            Response::Http {
-                status: 503,
-                body: r#"{"error":"unavailable"}"#,
-            },
-            Response::Http {
-                status: 200,
-                body: r#"{"ip":"1.1.1.1","success":true}"#,
-            },
-        ]);
-        let mut stdout = Vec::new();
-        let mut stderr = Vec::new();
-        let code = run_with_provider(
-            Args {
-                json: true,
-                targets: vec!["8.8.8.8".to_string(), "1.1.1.1".to_string()],
-                ..Args::default()
-            },
-            &server.client(),
-            None,
-            None,
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-
-        assert_eq!(code, 1);
-        let output = String::from_utf8(stdout).unwrap();
-        assert_eq!(output.lines().count(), 1);
-        let info: serde_json::Value = serde_json::from_str(output.trim()).unwrap();
-        assert_eq!(info["ip"], "1.1.1.1");
-        assert_eq!(info["success"], true);
-        let diagnostic = String::from_utf8(stderr).unwrap();
-        assert!(diagnostic.contains("8.8.8.8: lookup failed"));
-        assert!(!diagnostic.contains("1.1.1.1: lookup failed"));
-        assert_eq!(
-            server.requests(),
-            ["GET /8.8.8.8 HTTP/1.1", "GET /1.1.1.1 HTTP/1.1"]
-        );
-    }
-
-    #[test]
-    fn maxmind_json_lines_include_successes_dns_and_api_errors() {
+    fn maxmind_json_covers_success_dns_and_api_errors() {
         let server = TestServer::new(vec![
             Response::HttpWithType {
                 status: 404,
@@ -569,39 +664,35 @@ mod tests {
             },
             server.url(),
         );
-        let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let code = run_with_provider(
-            Args {
-                json: true,
-                targets: vec![
-                    "[invalid]".to_string(),
-                    "8.8.8.8".to_string(),
-                    "1.1.1.1".to_string(),
-                ],
-                ..Args::default()
-            },
-            &client,
-            Some("maxmind"),
-            Some("maxmind geoip country"),
-            &mut stdout,
-            &mut stderr,
-        )
-        .unwrap();
-
-        assert_eq!(code, 1);
-        let lines: Vec<serde_json::Value> = String::from_utf8(stdout)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect();
+        let mut lines = Vec::<serde_json::Value>::new();
+        for input in ["[invalid]", "8.8.8.8", "1.1.1.1"] {
+            let mut stdout = Vec::new();
+            let code = run_with_provider(
+                Args {
+                    json: true,
+                    target: Some(input.into()),
+                    ..Args::default()
+                },
+                &client,
+                Some("maxmind"),
+                Some("maxmind geoip country"),
+                &mut stdout,
+                &mut stderr,
+            )
+            .unwrap();
+            assert_eq!(code, u8::from(input != "1.1.1.1"));
+            lines.push(serde_json::from_slice(&stdout).unwrap());
+        }
         assert_eq!(lines.len(), 3);
         assert_eq!(lines[0]["target"], "[invalid]");
         assert_eq!(lines[0]["success"], false);
         assert_eq!(lines[0]["error"]["code"], "dns");
+        assert!(lines[0]["resolved_ip"].is_null());
         assert_eq!(lines[1]["error"]["code"], "no_data");
         assert_eq!(lines[1]["error"]["http_status"], 404);
         assert_eq!(lines[1]["target"], "8.8.8.8");
+        assert_eq!(lines[1]["resolved_ip"], "8.8.8.8");
         assert!(
             lines[1]["error"]["message"]
                 .as_str()
@@ -613,6 +704,7 @@ mod tests {
         assert_eq!(lines[2]["provider"], "maxmind geoip country");
         assert_eq!(lines[2]["data"]["country_code"], "AU");
         assert_eq!(lines[2]["success"], true);
+        assert_eq!(lines[2]["resolved_ip"], "1.1.1.1");
         assert_eq!(
             server.requests(),
             [
@@ -665,6 +757,7 @@ mod tests {
         assert_eq!(json["profile"], "mm");
         assert_eq!(json["provider"], "maxmind geoip country");
         assert_eq!(json["data"]["ip"], "8.8.8.8");
+        assert_eq!(json["resolved_ip"], "8.8.8.8");
         assert_eq!(server.requests(), ["GET /geoip/v2.1/country/me HTTP/1.1"]);
         assert!(stderr.is_empty());
 
