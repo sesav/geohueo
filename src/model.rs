@@ -48,8 +48,8 @@ pub struct GeoRecord {
     pub language_name: Option<String>,
 }
 
-/// A decoded lookup. Providers may attach an exact legacy JSON representation
-/// so existing consumers keep receiving their original schema.
+/// A decoded lookup. Providers may attach a legacy payload for library callers;
+/// the CLI always renders the normalized record.
 #[derive(Debug, Clone)]
 pub struct LookupResult {
     pub record: GeoRecord,

@@ -886,7 +886,7 @@ asn_number = "asn_to_number"
         }
         let mut jsonl = Vec::new();
         Output::for_profile(&mut jsonl, true, "path-service")
-            .emit(&result, "2001:db8::1", "2001:db8::1")
+            .emit(&result, "2001:db8::1", Some("2001:db8::1".parse().unwrap()))
             .unwrap();
         let line: Value = serde_json::from_slice(&jsonl).unwrap();
         assert_eq!(line["schema_version"], 1);

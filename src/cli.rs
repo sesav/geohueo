@@ -8,24 +8,23 @@ pub const HELP: &str = concat!(
     "geohueo ",
     env!("CARGO_PKG_VERSION"),
     "\n",
-    "IP geolocation via configurable providers\n",
+    "Look up the location and network details of an IP address\n",
     "\n",
-    "Usage: geohueo [OPTIONS] [HOST...]\n",
+    "Usage: geohueo [OPTIONS] [HOST]\n",
     "\n",
     "Arguments:\n",
-    "  HOST...  IPv4/IPv6 address or hostname to look up.\n",
-    "           If omitted, the public IP of this machine is looked up.\n",
+    "  HOST  An IPv4/IPv6 address or hostname.\n",
+    "        Omit it to look up your public IP.\n",
     "\n",
     "Options:\n",
     "  -4, --ipv4         Resolve hostnames to IPv4 only\n",
     "  -6, --ipv6         Resolve hostnames to IPv6 only\n",
-    "      --timeout SEC  HTTP timeout in positive whole seconds (default: 10)\n",
+    "      --timeout SEC  HTTP timeout in seconds (default: 10)\n",
     "      --config PATH  Load configuration from PATH\n",
     "      --profile NAME Use the named provider profile\n",
     "      --check-config  Validate configuration without a lookup\n",
     "      --list-profiles List configured provider profiles\n",
-    "  -j, --json         Print JSON Lines (legacy format for geoiplookup.io)\n",
-    "      --output normalized-json  Print versioned, normalized JSON Lines for any profile\n",
+    "  -j, --json         Print JSON\n",
     "  -h, --help         Print help\n",
     "  -V, --version      Print version\n",
     "  --                 Stop parsing options\n",
@@ -36,24 +35,22 @@ pub const HELP: &str = concat!(
 #[derive(Debug, PartialEq, Eq)]
 pub struct Args {
     pub json: bool,
-    pub normalized_json: bool,
     pub family: AddressFamily,
     pub timeout: Option<Duration>,
     pub config: Option<PathBuf>,
     pub profile: Option<String>,
-    pub targets: Vec<String>,
+    pub target: Option<String>,
 }
 
 impl Default for Args {
     fn default() -> Self {
         Self {
             json: false,
-            normalized_json: false,
             family: AddressFamily::Any,
             timeout: None,
             config: None,
             profile: None,
-            targets: Vec::new(),
+            target: None,
         }
     }
 }
@@ -84,24 +81,7 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
                 "-h" | "--help" => return Ok(Command::Help),
                 "-V" | "--version" => return Ok(Command::Version),
                 "-j" | "--json" => {
-                    if parsed.normalized_json {
-                        return Err(
-                            "options '--json' and '--output' cannot be used together".to_string()
-                        );
-                    }
                     parsed.json = true;
-                    continue;
-                }
-                "--output" => {
-                    let value = args
-                        .next()
-                        .transpose()?
-                        .ok_or("option '--output' requires a format")?;
-                    set_output(&mut parsed, &value)?;
-                    continue;
-                }
-                value if value.starts_with("--output=") => {
-                    set_output(&mut parsed, &value["--output=".len()..])?;
                     continue;
                 }
                 "-4" | "--ipv4" | "-6" | "--ipv6" => {
@@ -172,16 +152,18 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
             }
         }
 
-        parsed.targets.push(arg);
+        if parsed.target.replace(arg).is_some() {
+            return Err("only one IP address or hostname is allowed".to_string());
+        }
     }
 
     match command {
         None => Ok(Command::Run(parsed)),
         Some(option) => {
-            if !parsed.targets.is_empty() {
-                return Err(format!("option '{option}' cannot be used with targets"));
+            if parsed.target.is_some() {
+                return Err(format!("option '{option}' cannot be used with a target"));
             }
-            if parsed.json || parsed.normalized_json || parsed.family != AddressFamily::Any {
+            if parsed.json || parsed.family != AddressFamily::Any {
                 return Err(format!(
                     "option '{option}' cannot be used with output or DNS options"
                 ));
@@ -200,19 +182,6 @@ pub fn parse_args(args: impl IntoIterator<Item = OsString>) -> Result<Command, S
             }
         }
     }
-}
-
-fn set_output(args: &mut Args, value: &str) -> Result<(), String> {
-    if value != "normalized-json" {
-        return Err(format!(
-            "invalid value for '--output': '{value}' (expected normalized-json)"
-        ));
-    }
-    if args.json {
-        return Err("options '--json' and '--output' cannot be used together".to_string());
-    }
-    args.normalized_json = true;
-    Ok(())
 }
 
 fn set_command(current: &mut Option<&'static str>, option: &'static str) -> Result<(), String> {
@@ -263,12 +232,12 @@ mod tests {
     }
 
     #[test]
-    fn parses_flags_and_targets() {
+    fn parses_flags_and_a_target() {
         assert_eq!(
-            parse(&["--json", "8.8.8.8", "example.com."]).unwrap(),
+            parse(&["--json", "example.com."]).unwrap(),
             Command::Run(Args {
                 json: true,
-                targets: vec!["8.8.8.8".to_string(), "example.com.".to_string()],
+                target: Some("example.com.".to_string()),
                 ..Args::default()
             })
         );
@@ -282,13 +251,9 @@ mod tests {
     #[test]
     fn double_dash_stops_option_parsing() {
         assert_eq!(
-            parse(&["--", "--json", "-6", "--timeout=1"]).unwrap(),
+            parse(&["--", "--json"]).unwrap(),
             Command::Run(Args {
-                targets: vec![
-                    "--json".to_string(),
-                    "-6".to_string(),
-                    "--timeout=1".to_string(),
-                ],
+                target: Some("--json".to_string()),
                 ..Args::default()
             })
         );
@@ -313,7 +278,7 @@ mod tests {
                 parse(&[flag, "example.com"]).unwrap(),
                 Command::Run(Args {
                     family,
-                    targets: vec!["example.com".to_string()],
+                    target: Some("example.com".to_string()),
                     ..Args::default()
                 })
             );
@@ -351,43 +316,40 @@ mod tests {
     }
 
     #[test]
-    fn parses_new_options_between_targets() {
+    fn parses_options_after_the_target() {
         assert_eq!(
-            parse(&["8.8.8.8", "--timeout", "1", "-6", "example.com", "--json"]).unwrap(),
+            parse(&["example.com", "--timeout", "1", "-6", "--json"]).unwrap(),
             Command::Run(Args {
                 json: true,
-                normalized_json: false,
                 family: AddressFamily::Ipv6,
                 timeout: Some(Duration::from_secs(1)),
                 config: None,
                 profile: None,
-                targets: vec!["8.8.8.8".to_string(), "example.com".to_string()],
+                target: Some("example.com".to_string()),
             })
         );
     }
 
     #[test]
-    fn normalized_json_output_is_explicit_and_conflicts_with_legacy_flag() {
-        for option in [
-            vec!["--output", "normalized-json"],
-            vec!["--output=normalized-json"],
-        ] {
-            assert_eq!(
-                parse(&option).unwrap(),
-                Command::Run(Args {
-                    normalized_json: true,
-                    ..Args::default()
-                })
-            );
-        }
+    fn removed_options_are_rejected() {
         for options in [
             vec!["--output"],
-            vec!["--output=other"],
+            vec!["--output", "normalized-json"],
+            vec!["--output=normalized-json"],
             vec!["--json", "--output=normalized-json"],
-            vec!["--output=normalized-json", "-j"],
-            vec!["--check-config", "--output=normalized-json"],
+            vec!["--input", "ips.txt"],
+            vec!["--input=-"],
+            vec!["--jobs", "4"],
+            vec!["--jobs=4"],
+            vec!["--rate-limit", "5"],
+            vec!["--rate-limit=5"],
+            vec!["--retries", "2"],
+            vec!["--retries=2"],
         ] {
-            assert!(parse(&options).is_err(), "accepted {options:?}");
+            assert!(
+                parse(&options).unwrap_err().starts_with("unknown option"),
+                "accepted {options:?}"
+            );
         }
     }
 
@@ -426,6 +388,20 @@ mod tests {
     #[test]
     fn rejects_unknown_option() {
         assert!(parse(&["--wat"]).is_err());
+    }
+
+    #[test]
+    fn rejects_multiple_targets() {
+        for args in [
+            vec!["8.8.8.8", "1.1.1.1"],
+            vec!["example.com", "--json", "8.8.8.8"],
+            vec!["--", "8.8.8.8", "1.1.1.1"],
+        ] {
+            assert!(
+                parse(&args).unwrap_err().contains("only one"),
+                "accepted {args:?}"
+            );
+        }
     }
 
     #[test]

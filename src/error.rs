@@ -1,4 +1,4 @@
-//! Stable error categories for providers and normalized JSON Lines.
+//! Error categories for providers and JSON output.
 
 use std::fmt;
 

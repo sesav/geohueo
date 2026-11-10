@@ -62,6 +62,17 @@ fn help_succeeds_without_a_lookup() {
     ] {
         assert!(help.contains(option));
     }
+    for removed in [
+        "--output",
+        "--input",
+        "--jobs",
+        "--rate-limit",
+        "--retries",
+        "HOST...",
+        "legacy",
+    ] {
+        assert!(!help.contains(removed));
+    }
 }
 
 #[test]
@@ -122,73 +133,91 @@ fn conflicting_address_families_return_usage_error_without_a_lookup() {
 }
 
 #[test]
-fn resolution_failures_do_not_stop_remaining_targets() {
-    // Malformed targets are rejected locally without DNS or API requests.
+fn invalid_target_returns_a_json_error_without_a_lookup() {
+    // This input is rejected before DNS or HTTP.
     let output = isolated_command()
-        .args(["--json", "-4", "--timeout=5", "[invalid]", "[also-invalid]"])
+        .args(["--json", "-4", "--timeout=5", "[invalid]"])
         .output()
         .unwrap();
 
     assert_eq!(output.status.code(), Some(1));
-    assert!(output.stdout.is_empty());
-    assert_eq!(
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(result["target"], "[invalid]");
+    assert_eq!(result["error"]["code"], "dns");
+    assert!(
         String::from_utf8(output.stderr)
             .unwrap()
-            .matches("cannot resolve")
-            .count(),
-        2
+            .contains("cannot resolve")
     );
 }
 
 #[test]
-fn explicit_normalized_json_has_one_error_per_target_without_changing_legacy_json() {
-    let normalized = isolated_command()
-        .args(["--output", "normalized-json", "[invalid]", "[also-invalid]"])
-        .output()
-        .unwrap();
-    assert_eq!(normalized.status.code(), Some(1));
-    let lines: Vec<serde_json::Value> = String::from_utf8(normalized.stdout)
-        .unwrap()
-        .lines()
-        .map(|line| serde_json::from_str(line).unwrap())
-        .collect();
-    assert_eq!(lines.len(), 2);
-    assert_eq!(lines[0]["profile"], "geoiplookup");
-    assert_eq!(lines[0]["target"], "[invalid]");
-    assert_eq!(lines[0]["schema_version"], 1);
-    assert_eq!(lines[0]["success"], false);
-    assert!(
-        lines[0]["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("cannot resolve")
-    );
-    assert!(lines[0].get("data").is_none());
-    assert_eq!(lines[1]["target"], "[also-invalid]");
+fn multiple_targets_are_rejected_before_any_lookup() {
+    for args in [
+        vec!["8.8.8.8", "1.1.1.1"],
+        vec!["--json", "example.com", "8.8.8.8"],
+        vec!["--", "8.8.8.8", "1.1.1.1"],
+    ] {
+        let output = isolated_command().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("only one")
+        );
+    }
+}
 
-    let legacy = isolated_command()
-        .args(["--json", "[invalid]"])
-        .output()
-        .unwrap();
-    assert_eq!(legacy.status.code(), Some(1));
-    assert!(legacy.stdout.is_empty());
-    let conflicting = isolated_command()
-        .args(["--output=normalized-json", "--json", "[invalid]"])
-        .output()
-        .unwrap();
-    assert_eq!(conflicting.status.code(), Some(2));
-    assert!(conflicting.stdout.is_empty());
+#[test]
+fn removed_options_return_usage_errors() {
+    for args in [
+        vec!["--output", "normalized-json"],
+        vec!["--output=normalized-json"],
+        vec!["--input", "ips.txt"],
+        vec!["--input=-"],
+        vec!["--jobs", "4"],
+        vec!["--jobs=4"],
+        vec!["--rate-limit", "5"],
+        vec!["--rate-limit=5"],
+        vec!["--retries", "2"],
+        vec!["--retries=2"],
+    ] {
+        let output = isolated_command().args(args).output().unwrap();
+        assert_eq!(output.status.code(), Some(2));
+        assert!(output.stdout.is_empty());
+        assert!(
+            String::from_utf8(output.stderr)
+                .unwrap()
+                .contains("unknown option")
+        );
+    }
+}
+
+#[test]
+fn json_uses_one_format_and_preserves_profile_aliases() {
+    for flag in ["-j", "--json"] {
+        let output = isolated_command()
+            .args([flag, "[invalid]"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(1));
+        let result: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+        assert_eq!(result["profile"], "geoiplookup");
+        assert_eq!(result["provider"], "geoiplookup.io");
+        assert_eq!(result["target"], "[invalid]");
+        assert_eq!(result["schema_version"], 1);
+        assert_eq!(result["success"], false);
+        assert_eq!(result["error"]["code"], "dns");
+        assert!(result["resolved_ip"].is_null());
+        assert!(result.get("data").is_none());
+    }
 
     let alias = TempConfig::new(
         "schema_version = 1\ndefault_profile = 'personal'\n[profiles.personal]\nadapter = 'geoiplookup'\n",
     );
     let renamed = isolated_command()
-        .args([
-            "--config",
-            alias.0.to_str().unwrap(),
-            "--output=normalized-json",
-            "[invalid]",
-        ])
+        .args(["--config", alias.0.to_str().unwrap(), "--json", "[invalid]"])
         .output()
         .unwrap();
     assert_eq!(renamed.status.code(), Some(1));
