@@ -209,5 +209,16 @@ jobs:
           if [[ "$PRERELEASE" == true ]]; then
             options+=(--prerelease)
           fi
-          # With assets, gh creates a draft, uploads everything, then publishes that release by ID.
-          gh release create "$RELEASE_TAG" dist/* "${options[@]}"
+          if asset_count=$(gh release view "$RELEASE_TAG" --json assets --jq '.assets | length' 2>/dev/null); then
+            if [[ "$asset_count" != 0 ]]; then
+              echo "::error::Release $RELEASE_TAG already has assets; refusing to overwrite them."
+              exit 1
+            fi
+            # Keep an existing empty release hidden until all files are uploaded.
+            gh release edit "$RELEASE_TAG" --draft=true
+            gh release upload "$RELEASE_TAG" dist/*
+            gh release edit "$RELEASE_TAG" --draft=false
+          else
+            # With assets, gh creates a draft, uploads everything, then publishes it.
+            gh release create "$RELEASE_TAG" dist/* "${options[@]}"
+          fi

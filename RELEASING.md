@@ -28,5 +28,6 @@ The workflow does not publish to crates.io. Publish the Cargo package separately
 
 ## If something fails
 
-Rerun the failed jobs. If the run left a draft release, check it before retrying: existing releases are not overwritten.
+Rerun the failed jobs. The publish step can fill an existing empty release. It keeps the release as a draft until all
+files are uploaded. Releases that already have files are not changed; check a partial draft before retrying.
 Do not delete or move a public tag. Use a new version if the code needs to change.
